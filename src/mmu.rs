@@ -13,6 +13,11 @@ pub const PERM_WRITE: u8 = 1 << 1;
 pub const PERM_READ: u8 = 1 << 2;
 
 /// Read-after-write memory. Aimed to be used with `Perm`.
+///
+/// This permission is assigned automatically when allocating memory. If a
+/// memory position has this flag and is written, the READ permission will be
+/// automatically assigned afterwards. This allows us to detect accesses to
+/// unitialized memory.
 pub const PERM_RAW: u8 = 1 << 3;
 
 /// Block sized used for resetting and tracking memory which has been modified.
@@ -45,7 +50,7 @@ impl Deref for VirtAddr {
 /// Memory errors.
 #[derive(Debug)]
 pub enum MemoryError {
-    /// There is not room to allocate the requested size.
+    /// There is not enough free memory to allocate the requested size.
     OutOfMemory,
 
     /// Memory address is out of range.
@@ -57,15 +62,15 @@ pub enum MemoryError {
     /// Integer overflow happened when operating with a memory address.
     IntegerOverflow,
 
-    /// Access permissions are not compatible with memory permissions.
+    /// Invalid permissions.
     NotAllowed,
 }
 
 /// Emulated memory management unit.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Mmu {
-    /// End address of the memory space (non-inclusive).
-    memory_end: VirtAddr,
+    /// Memory size.
+    size: usize,
 
     /// Memory contents.
     memory: Vec<u8>,
@@ -90,11 +95,10 @@ impl Mmu {
     ///
     /// This function may panic if size is 0.
     pub fn new(size: usize) -> Mmu {
-        // Size cannot be 0.
         assert!(size > 0, "invalid size");
 
         Mmu {
-            memory_end: VirtAddr(size),
+            size,
             memory: vec![0; size],
             perms: vec![Perm(0); size],
             dirty: Vec::with_capacity(size / DIRTY_BLOCK_SIZE + 1),
@@ -106,47 +110,35 @@ impl Mmu {
     /// Returns a copy of the MMU. It marks all memory as clean in the new
     /// copy.
     pub fn fork(&self) -> Mmu {
-        let size = self.memory.len();
-
         Mmu {
-            memory_end: self.memory_end,
+            size: self.size,
             memory: self.memory.clone(),
             perms: self.perms.clone(),
-            dirty: Vec::with_capacity(size / DIRTY_BLOCK_SIZE + 1),
-            dirty_bitmap: vec![0; size / DIRTY_BLOCK_SIZE / 64 + 1],
+            dirty: Vec::with_capacity(self.size / DIRTY_BLOCK_SIZE + 1),
+            dirty_bitmap: vec![0; self.size / DIRTY_BLOCK_SIZE / 64 + 1],
             alloc_end: self.alloc_end,
         }
     }
 
-    /// Restores memory to the original state `other`, inclusing dirty marks.
+    /// Restores memory to the original state `other`.
     pub fn reset(&mut self, other: &Mmu) {
+        // Restore memory and set as clean.
         for &block in &self.dirty {
-            // Compute start and end indices of the dirty block.
             let start = block * DIRTY_BLOCK_SIZE;
             let end = (block + 1) * DIRTY_BLOCK_SIZE;
 
-            // Zero bitmap.
             self.dirty_bitmap[block / 64] = 0;
-
-            // Restore memory.
             self.memory[start..end].copy_from_slice(&other.memory[start..end]);
-
-            // Restore permissions.
             self.perms[start..end].copy_from_slice(&other.perms[start..end]);
         }
-
-        // Clear dirty marks.
         self.dirty.clear();
 
-        // Restore allocation's end address.
         self.alloc_end = other.alloc_end;
     }
 
-    /// Allocate `size` bytes as RW. They will be marked initially as RAW in
-    /// order to detect accesses to unitialized memory. Returns the new
-    /// allocation limit.
+    /// Allocate `size` bytes as WRITE. They will be set as RAW in order to
+    /// detect accesses to unitialized memory. Returns the new top address.
     pub fn allocate(&mut self, size: usize) -> Result<VirtAddr, MemoryError> {
-        // If size is 0, we just return the current allocation limit.
         if size == 0 {
             return Ok(self.alloc_end);
         }
@@ -158,11 +150,8 @@ impl Mmu {
             Some(addr) => addr,
             None => return Err(MemoryError::IntegerOverflow),
         };
-        let new_alloc_end = VirtAddr(new_alloc_end);
 
-        // the new range must be within the hard memory boundaries imposed by
-        // the MMU.
-        if new_alloc_end > self.memory_end {
+        if new_alloc_end > self.size {
             return Err(MemoryError::OutOfMemory);
         }
 
@@ -176,8 +165,7 @@ impl Mmu {
             Perm(PERM_WRITE | PERM_RAW),
         );
 
-        // Update alloc_end with the new value.
-        self.alloc_end = new_alloc_end;
+        self.alloc_end = VirtAddr(new_alloc_end);
 
         Ok(self.alloc_end)
     }
@@ -190,7 +178,6 @@ impl Mmu {
         size: usize,
         perms: Perm,
     ) {
-        // Set permissions for every byte in the memory range.
         let end = *addr + size;
         self.perms[*addr..end].iter_mut().for_each(|p| *p = perms);
 
@@ -213,70 +200,67 @@ impl Mmu {
         }
     }
 
-    /// Set memory permissions in the given range. This function may return a
-    /// `MemoryError` if the range is not valid.
+    /// Set memory permissions in the given range.
     pub fn set_perms(
         &mut self,
         addr: VirtAddr,
         size: usize,
         perms: Perm,
     ) -> Result<(), MemoryError> {
-        // Check that the range is within the limits of the memory.
-        let new_memory_end = match addr.checked_add(size) {
+        // We must ensure that calculating the end adddress does not overflow.
+        // Otherwise, there could be problems when checking memory boundaries.
+        let end = match addr.checked_add(size) {
             Some(x) => x,
             None => return Err(MemoryError::IntegerOverflow),
         };
-        if new_memory_end > *self.memory_end {
+
+        if end > self.size {
             return Err(MemoryError::InvalidAddress);
         }
 
-        // Now that we know that the address range is valid, we can set the
-        // specified permissions.
         self.set_perms_unchecked(addr, size, perms);
         Ok(())
     }
 
-    /// Given a memory address, a size and the expected permissions, this
-    /// function will return true if every byte in the specified region
-    /// satisfies those permissions. Otherwise, the function will return false.
-    /// A `MemoryError` may be returned if the memory range is out of bounds.
+    /// Given a memory range and the expected permissions, this function will
+    /// return true if every byte in the specified region satisfies those
+    /// permissions. Otherwise, the function will return false.
     pub fn check_perms(
         &self,
         addr: VirtAddr,
         size: usize,
         perms: Perm,
     ) -> Result<bool, MemoryError> {
-        // Check that the range is within the limits of the memory.
-        let new_memory_end = match addr.checked_add(size) {
+        // We must ensure that calculating the end adddress does not overflow.
+        // Otherwise, there could be problems when checking memory boundaries.
+        let end = match addr.checked_add(size) {
             Some(x) => x,
             None => return Err(MemoryError::IntegerOverflow),
         };
-        if new_memory_end > *self.memory_end {
+
+        if end > self.size {
             return Err(MemoryError::InvalidAddress);
         }
 
-        // Check that every byte in the range has at least the expected
-        // permissions.
-        let end = *addr + size;
         let result = self.perms[*addr..end]
             .iter()
             .all(|p| **p & *perms == *perms);
         Ok(result)
     }
 
-    /// Write bytes in memory range.
+    /// Copy the bytes in `src` to the given memory address. This function will
+    /// fail if the destination memory is not writable.
     pub fn write(
         &mut self,
         addr: VirtAddr,
         src: &[u8],
     ) -> Result<(), MemoryError> {
-        // Ensure that the memory region is writable.
         self.write_if_perms(addr, src, Perm(PERM_WRITE))
     }
 
-    /// Write bytes in memory range, checking the permissions first. If the
-    /// expected perms include `PERM_WRITE` and the memory positions is marked
-    /// as RAW, the perm `PERM_READ` will be set.
+    /// Copy the bytes in `src` to the given memory address. If the expected
+    /// perms include `PERM_WRITE` and the memory position is marked as RAW,
+    /// `PERM_READ` will be set.
     pub fn write_if_perms(
         &mut self,
         addr: VirtAddr,
@@ -293,7 +277,6 @@ impl Mmu {
 
         let end = *addr + size;
 
-        // Update memory.
         self.memory[*addr..end].copy_from_slice(src);
 
         // Add PERM_READ in case of RAW.
@@ -315,7 +298,6 @@ impl Mmu {
             let idx = block / 64;
             let bit = block % 64;
 
-            // Push block to the dirty list if it's not already there.
             if self.dirty_bitmap[idx] & (1 << bit) == 0 {
                 self.dirty_bitmap[idx] |= 1 << bit;
                 self.dirty.push(block);
@@ -325,17 +307,17 @@ impl Mmu {
         Ok(())
     }
 
-    /// Returns bytes in memory range.
+    /// Returns a slice with the data stored in the specified memory range.
+    /// This function will fail if the source memory is not readable.
     pub fn read(
         &self,
         addr: VirtAddr,
         size: usize,
     ) -> Result<&[u8], MemoryError> {
-        // Ensure that the memory region is readable.
         self.read_if_perms(addr, size, Perm(PERM_READ))
     }
 
-    /// Returns bytes in memory range, checking the permissions first.
+    /// Returns a slice with the data stored in the specified memory range.
     pub fn read_if_perms(
         &self,
         addr: VirtAddr,
@@ -362,7 +344,7 @@ mod tests {
     fn mmu_new() {
         let mmu = Mmu::new(16);
         let want = Mmu {
-            memory_end: VirtAddr(16),
+            size: 16,
             memory: vec![0; 16],
             perms: vec![Perm(0); 16],
             dirty: vec![],
