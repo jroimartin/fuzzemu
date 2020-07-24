@@ -1,8 +1,7 @@
 # riscv-emu
 
-This project is just me trying to replicate the work done by Brandon Falk
-during the [fuzz week](https://github.com/gamozolabs/fuzz_with_emus/) for
-learning purposes and experimentation.
+This project is just me trying to replicate the work done by **Brandon Falk**
+during the **Fuzz Week** for learning purposes and experimentation.
 
 ## Fuzz Week
 
