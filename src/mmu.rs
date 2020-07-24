@@ -210,7 +210,7 @@ impl Mmu {
         // We must ensure that calculating the end adddress does not overflow.
         // Otherwise, there could be problems when checking memory boundaries.
         let end = match addr.checked_add(size) {
-            Some(x) => x,
+            Some(addr) => addr,
             None => return Err(MemoryError::IntegerOverflow),
         };
 
@@ -234,7 +234,7 @@ impl Mmu {
         // We must ensure that calculating the end adddress does not overflow.
         // Otherwise, there could be problems when checking memory boundaries.
         let end = match addr.checked_add(size) {
-            Some(x) => x,
+            Some(addr) => addr,
             None => return Err(MemoryError::IntegerOverflow),
         };
 
