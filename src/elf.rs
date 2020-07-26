@@ -10,19 +10,19 @@ use crate::mmu::{Perm, VirtAddr};
 /// ELF executable.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Elf {
-    phdrs: Vec<Phdr>,
-    entry: VirtAddr,
+    pub phdrs: Vec<Phdr>,
+    pub entry: VirtAddr,
 }
 
 /// ELF program header.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Phdr {
-    offset: usize,
-    virt_addr: VirtAddr,
-    file_size: usize,
-    mem_size: usize,
-    perms: Perm,
-    align: usize,
+    pub offset: usize,
+    pub virt_addr: VirtAddr,
+    pub file_size: usize,
+    pub mem_size: usize,
+    pub perms: Perm,
+    pub align: usize,
 }
 
 /// Error related to ELF parsing.
@@ -40,15 +40,15 @@ impl From<io::Error> for Error {
 
 impl Elf {
     /// Parses an ELF file and returs an `Elf` structure.
-    pub fn load_file<T: AsRef<Path>>(path: T) -> Result<Elf, Error> {
+    pub fn parse_file<P: AsRef<Path>>(path: P) -> Result<Elf, Error> {
         let contents = fs::read(path)?;
 
-        Elf::load(&contents)
+        Elf::parse(&contents)
     }
 
     /// Parses a slice of bytes with the contents of an ELF file and returs an
     /// `Elf` structure.
-    pub fn load(contents: &[u8]) -> Result<Elf, Error> {
+    pub fn parse(contents: &[u8]) -> Result<Elf, Error> {
         // Check ELF magic.
         if &contents[0..4] != b"\x7fELF" {
             return Err(Error::MalformedFile);
@@ -130,7 +130,7 @@ mod tests {
     use crate::mmu::{PERM_EXEC, PERM_READ, PERM_WRITE};
 
     #[test]
-    fn load_file() {
+    fn parse_file() {
         let want = Elf {
             phdrs: vec![
                 Phdr {
@@ -153,6 +153,6 @@ mod tests {
             entry: VirtAddr(0x100c8),
         };
 
-        assert_eq!(Elf::load_file("testdata/hello").unwrap(), want);
+        assert_eq!(Elf::parse_file("testdata/hello").unwrap(), want);
     }
 }
