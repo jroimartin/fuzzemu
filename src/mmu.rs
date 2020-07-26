@@ -89,13 +89,14 @@ pub struct Mmu {
 }
 
 impl Mmu {
-    /// Returns a new Mmu with a given maximum memory size.
+    /// Returns a new Mmu with a given memory `size`. `alloc_base` sets the
+    /// initial base address for memory allocations
     ///
     /// # Panics
     ///
-    /// This function may panic if size is 0.
-    pub fn new(size: usize) -> Mmu {
-        assert!(size > 0, "invalid size");
+    /// This function panics if `size` is 0 or below `alloc_base`.
+    pub fn new(size: usize, alloc_base: VirtAddr) -> Mmu {
+        assert!(size > 0 && size >= *alloc_base, "invalid size");
 
         Mmu {
             size,
@@ -103,7 +104,7 @@ impl Mmu {
             perms: vec![Perm(0); size],
             dirty: Vec::with_capacity(size / DIRTY_BLOCK_SIZE + 1),
             dirty_bitmap: vec![0; size / DIRTY_BLOCK_SIZE / 64 + 1],
-            alloc_end: VirtAddr(0),
+            alloc_end: alloc_base,
         }
     }
 
@@ -178,26 +179,8 @@ impl Mmu {
         size: usize,
         perms: Perm,
     ) {
-        let end = *addr + size;
-        self.perms[*addr..end].iter_mut().for_each(|p| *p = perms);
-
-        // Compute dirty blocks and bitmap.
-        let block_start = *addr / DIRTY_BLOCK_SIZE;
-        let block_end = if end % DIRTY_BLOCK_SIZE == 0 {
-            end / DIRTY_BLOCK_SIZE
-        } else {
-            end / DIRTY_BLOCK_SIZE + 1
-        };
-
-        for block in block_start..block_end {
-            let idx = block / 64;
-            let bit = block % 64;
-
-            if self.dirty_bitmap[idx] & (1 << bit) == 0 {
-                self.dirty_bitmap[idx] |= 1 << bit;
-                self.dirty.push(block);
-            }
-        }
+        self.perms[*addr..*addr + size].iter_mut().for_each(|p| *p = perms);
+        self.compute_dirty(addr, size);
     }
 
     /// Set memory permissions in the given range.
@@ -286,23 +269,7 @@ impl Mmu {
             }
         });
 
-        // Compute dirty blocks and bitmap.
-        let block_start = *addr / DIRTY_BLOCK_SIZE;
-        let block_end = if end % DIRTY_BLOCK_SIZE == 0 {
-            end / DIRTY_BLOCK_SIZE
-        } else {
-            end / DIRTY_BLOCK_SIZE + 1
-        };
-
-        for block in block_start..block_end {
-            let idx = block / 64;
-            let bit = block % 64;
-
-            if self.dirty_bitmap[idx] & (1 << bit) == 0 {
-                self.dirty_bitmap[idx] |= 1 << bit;
-                self.dirty.push(block);
-            }
-        }
+        self.compute_dirty(addr, size);
 
         Ok(())
     }
@@ -334,6 +301,25 @@ impl Mmu {
         let end = *addr + size;
         Ok(&self.memory[*addr..end])
     }
+
+    /// Compute dirty blocks and bitmap. It does not check if the memory range
+    /// is valid.
+    fn compute_dirty(&mut self, addr: VirtAddr, size: usize) {
+        let block_start = *addr / DIRTY_BLOCK_SIZE;
+        // Calculate the start of the next block. It takes into account corner
+        // cases like `end` being equal to the start of the next block.
+        let block_end = (*addr + size + (DIRTY_BLOCK_SIZE - 1)) / DIRTY_BLOCK_SIZE;
+
+        for block in block_start..block_end {
+            let idx = block / 64;
+            let bit = block % 64;
+
+            if self.dirty_bitmap[idx] & (1 << bit) == 0 {
+                self.dirty_bitmap[idx] |= 1 << bit;
+                self.dirty.push(block);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -342,7 +328,7 @@ mod tests {
 
     #[test]
     fn mmu_new() {
-        let mmu = Mmu::new(16);
+        let mmu = Mmu::new(16, VirtAddr(0));
         let want = Mmu {
             size: 16,
             memory: vec![0; 16],
@@ -358,12 +344,18 @@ mod tests {
     #[test]
     #[should_panic]
     fn mmu_new_zero_size() {
-        Mmu::new(0);
+        Mmu::new(0, VirtAddr(0));
+    }
+
+    #[test]
+    #[should_panic]
+    fn mmu_new_size_lt_alloc_init() {
+        Mmu::new(0xffff, VirtAddr(0x10000));
     }
 
     #[test]
     fn mmu_check_perms() {
-        let mut mmu = Mmu::new(16);
+        let mut mmu = Mmu::new(16, VirtAddr(0));
         mmu.set_perms(VirtAddr(0), 8, Perm(PERM_WRITE | PERM_READ))
             .unwrap();
 
@@ -374,7 +366,7 @@ mod tests {
 
     #[test]
     fn mmu_check_perms_subset() {
-        let mut mmu = Mmu::new(16);
+        let mut mmu = Mmu::new(16, VirtAddr(0));
         mmu.set_perms(VirtAddr(0), 8, Perm(PERM_WRITE)).unwrap();
 
         assert!(!mmu
@@ -384,7 +376,7 @@ mod tests {
 
     #[test]
     fn mmu_check_perms_oob() {
-        let mut mmu = Mmu::new(16);
+        let mut mmu = Mmu::new(16, VirtAddr(0));
         match mmu.set_perms(VirtAddr(5), 16, Perm(PERM_WRITE)) {
             Err(MemoryError::InvalidAddress) => return,
             Err(err) => panic!("Wrong error {:?}", err),
@@ -394,7 +386,7 @@ mod tests {
 
     #[test]
     fn mmu_write_read() {
-        let mut mmu = Mmu::new(4);
+        let mut mmu = Mmu::new(4, VirtAddr(0));
         mmu.allocate(4).unwrap();
         mmu.write(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
         let got = mmu.read(VirtAddr(0), 4).unwrap();
@@ -404,7 +396,7 @@ mod tests {
 
     #[test]
     fn mmu_write_not_allowed() {
-        let mut mmu = Mmu::new(4);
+        let mut mmu = Mmu::new(4, VirtAddr(0));
         match mmu.write(VirtAddr(0), &[1, 2, 3, 4]) {
             Err(MemoryError::NotAllowed) => return,
             Err(err) => panic!("Wrong error {:?}", err),
@@ -414,7 +406,7 @@ mod tests {
 
     #[test]
     fn mmu_read_not_allowed() {
-        let mmu = Mmu::new(4);
+        let mmu = Mmu::new(4, VirtAddr(0));
         match mmu.read(VirtAddr(0), 2) {
             Err(MemoryError::NotAllowed) => return,
             Err(err) => panic!("Wrong error {:?}", err),
@@ -424,7 +416,7 @@ mod tests {
 
     #[test]
     fn mmu_raw_after_write() {
-        let mut mmu = Mmu::new(4);
+        let mut mmu = Mmu::new(4, VirtAddr(0));
         mmu.allocate(3).unwrap();
         mmu.write(VirtAddr(0), &[1, 2]).unwrap();
 
@@ -442,7 +434,7 @@ mod tests {
 
     #[test]
     fn mmu_reset() {
-        let mmu = Mmu::new(1024 * 1024);
+        let mmu = Mmu::new(1024 * 1024, VirtAddr(0));
         let mut mmu_fork = mmu.fork();
 
         mmu_fork
@@ -458,7 +450,7 @@ mod tests {
 
     #[test]
     fn mmu_reset_two_blocks() {
-        let mmu = Mmu::new(1024 * 1024);
+        let mmu = Mmu::new(1024 * 1024, VirtAddr(0));
         let mut mmu_fork = mmu.fork();
 
         mmu_fork
@@ -474,7 +466,7 @@ mod tests {
 
     #[test]
     fn mmu_reset_allocate_all() {
-        let mmu = Mmu::new(1024 * 1024);
+        let mmu = Mmu::new(1024 * 1024, VirtAddr(0));
         let mut mmu_fork = mmu.fork();
 
         mmu_fork.allocate(1024 * 1024).unwrap();

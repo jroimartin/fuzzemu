@@ -3,8 +3,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use riscv_emu::emulator::Emulator;
+use riscv_emu::mmu::VirtAddr;
 
-const NUM_CORES: usize = 1;
+const NCORES: usize = 8;
 
 #[derive(Default)]
 struct Stats {
@@ -33,12 +34,13 @@ fn worker(emu_init: Arc<Emulator>, stats: Arc<Mutex<Stats>>) {
 }
 
 fn main() {
-    let emu_init = Arc::new(Emulator::new(32 * 1024));
+    let emu_init =
+        Arc::new(Emulator::new(32 * 1024 * 1024, VirtAddr(0x10000)));
     let stats = Arc::new(Mutex::new(Stats::default()));
 
     let start = Instant::now();
 
-    for _ in 0..NUM_CORES {
+    for _ in 0..NCORES {
         let emu_init = Arc::clone(&emu_init);
         let stats = Arc::clone(&stats);
 

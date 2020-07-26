@@ -1,10 +1,10 @@
-use riscv_emu::mmu::Mmu;
+use riscv_emu::mmu::{Mmu, VirtAddr};
 use std::time::Instant;
 
 const NUM_ITER: usize = 1000;
 
 fn bench_mmu_fork() -> f64 {
-    let mmu = Mmu::new(4 * 1024 * 1024);
+    let mmu = Mmu::new(4 * 1024 * 1024, VirtAddr(0));
 
     let start = Instant::now();
 
@@ -16,7 +16,7 @@ fn bench_mmu_fork() -> f64 {
 }
 
 fn bench_mmu_reset() -> f64 {
-    let mmu_init = Mmu::new(4 * 1024 * 1024);
+    let mmu_init = Mmu::new(4 * 1024 * 1024, VirtAddr(0));
     let mut mmu_fork = mmu_init.fork();
 
     let start = Instant::now();
