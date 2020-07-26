@@ -68,7 +68,7 @@ impl Elf {
                 as usize;
 
         // Parse PT_LOAD program headers.
-        let mut phdrs: Vec<Phdr> = Vec::with_capacity(e_phnum);
+        let mut phdrs = Vec::with_capacity(e_phnum);
 
         for i in 0..e_phnum {
             let off = e_phoff + i * 56;
@@ -80,6 +80,7 @@ impl Elf {
                 continue;
             }
 
+            // Get the relevant fields of the program header.
             let p_flags = u32::from_le_bytes(
                 contents[off + 4..off + 8].try_into().unwrap(),
             );
