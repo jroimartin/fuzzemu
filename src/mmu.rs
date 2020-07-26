@@ -4,13 +4,13 @@
 use std::ops::Deref;
 
 /// Executable memory. Aimed to be used with `Perm`.
-pub const PERM_EXEC: u8 = 1;
+pub const PERM_EXEC: u32 = 1;
 
 /// Writable memory. Aimed to be used with `Perm`.
-pub const PERM_WRITE: u8 = 1 << 1;
+pub const PERM_WRITE: u32 = 1 << 1;
 
 /// Readable memory. Aimed to be used with `Perm`.
-pub const PERM_READ: u8 = 1 << 2;
+pub const PERM_READ: u32 = 1 << 2;
 
 /// Read-after-write memory. Aimed to be used with `Perm`.
 ///
@@ -18,17 +18,17 @@ pub const PERM_READ: u8 = 1 << 2;
 /// memory position has this flag and is written, the READ permission will be
 /// automatically assigned afterwards. This allows us to detect accesses to
 /// unitialized memory.
-pub const PERM_RAW: u8 = 1 << 3;
+pub const PERM_RAW: u32 = 1 << 16;
 
 /// Block sized used for resetting and tracking memory which has been modified.
 const DIRTY_BLOCK_SIZE: usize = 1024;
 
 /// Memory permissions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Perm(pub u8);
+pub struct Perm(pub u32);
 
 impl Deref for Perm {
-    type Target = u8;
+    type Target = u32;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -179,7 +179,9 @@ impl Mmu {
         size: usize,
         perms: Perm,
     ) {
-        self.perms[*addr..*addr + size].iter_mut().for_each(|p| *p = perms);
+        self.perms[*addr..*addr + size]
+            .iter_mut()
+            .for_each(|p| *p = perms);
         self.compute_dirty(addr, size);
     }
 
@@ -308,7 +310,8 @@ impl Mmu {
         let block_start = *addr / DIRTY_BLOCK_SIZE;
         // Calculate the start of the next block. It takes into account corner
         // cases like `end` being equal to the start of the next block.
-        let block_end = (*addr + size + (DIRTY_BLOCK_SIZE - 1)) / DIRTY_BLOCK_SIZE;
+        let block_end =
+            (*addr + size + (DIRTY_BLOCK_SIZE - 1)) / DIRTY_BLOCK_SIZE;
 
         for block in block_start..block_end {
             let idx = block / 64;
