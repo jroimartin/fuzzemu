@@ -39,14 +39,14 @@ impl From<io::Error> for Error {
 }
 
 impl Elf {
-    /// Parses an ELF file and returs an `Elf` structure.
+    /// Parses an ELF file and returns an `Elf` structure.
     pub fn parse_file<P: AsRef<Path>>(path: P) -> Result<Elf, Error> {
         let contents = fs::read(path)?;
 
         Elf::parse(&contents)
     }
 
-    /// Parses a slice of bytes with the contents of an ELF file and returs an
+    /// Parses a slice of bytes with the contents of an ELF file and returns an
     /// `Elf` structure.
     pub fn parse(contents: &[u8]) -> Result<Elf, Error> {
         // Check ELF magic.
