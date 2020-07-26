@@ -113,7 +113,7 @@ impl Elf {
         }
 
         // Return an error if no PT_LOAD headers were found.
-        if phdrs.len() == 0 {
+        if phdrs.is_empty() {
             return Err(Error::MalformedFile);
         }
 
