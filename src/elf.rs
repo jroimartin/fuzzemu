@@ -56,15 +56,15 @@ impl Elf {
 
         // Get entrypoint.
         let e_entry =
-            usize::from_le_bytes(contents[24..24 + 8].try_into().unwrap());
+            usize::from_le_bytes(contents[24..32].try_into().unwrap());
 
         // Get program headers offset.
         let e_phoff =
-            usize::from_le_bytes(contents[32..32 + 8].try_into().unwrap());
+            usize::from_le_bytes(contents[32..40].try_into().unwrap());
 
         // Get number of program headers.
         let e_phnum =
-            u16::from_le_bytes(contents[56..56 + 2].try_into().unwrap())
+            u16::from_le_bytes(contents[56..58].try_into().unwrap())
                 as usize;
 
         // Parse PT_LOAD program headers.
