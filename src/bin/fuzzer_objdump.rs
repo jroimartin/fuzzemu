@@ -1,9 +1,9 @@
+use std::process;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use riscv_emu::emulator::Emulator;
-use riscv_emu::mmu::VirtAddr;
 
 const NCORES: usize = 8;
 
@@ -34,8 +34,13 @@ fn worker(emu_init: Arc<Emulator>, stats: Arc<Mutex<Stats>>) {
 }
 
 fn main() {
-    let emu_init =
-        Arc::new(Emulator::new(32 * 1024 * 1024, VirtAddr(0x10000)));
+    let emu_init = Emulator::new("testdata/hello", 32 * 1024 * 1024)
+        .unwrap_or_else(|err| {
+            eprintln!("error: could not create emulator: {}", err);
+            process::exit(1);
+        });
+    let emu_init = Arc::new(emu_init);
+
     let stats = Arc::new(Mutex::new(Stats::default()));
 
     let start = Instant::now();

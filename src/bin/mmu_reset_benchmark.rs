@@ -1,10 +1,10 @@
-use riscv_emu::mmu::{Mmu, VirtAddr};
+use riscv_emu::mmu::{Mmu, Perm, VirtAddr, PERM_WRITE};
 use std::time::Instant;
 
 const NUM_ITER: usize = 1000;
 
 fn bench_mmu_fork() -> f64 {
-    let mmu = Mmu::new(4 * 1024 * 1024, VirtAddr(0));
+    let mmu = Mmu::new(4 * 1024 * 1024);
 
     let start = Instant::now();
 
@@ -16,8 +16,13 @@ fn bench_mmu_fork() -> f64 {
 }
 
 fn bench_mmu_reset() -> f64 {
-    let mmu_init = Mmu::new(4 * 1024 * 1024, VirtAddr(0));
+    let mmu_init = Mmu::new(1024 * 1024);
     let mut mmu_fork = mmu_init.fork();
+
+    // Mark the second memory block as dirty
+    mmu_fork
+        .set_perms(VirtAddr(1024), 2, Perm(PERM_WRITE))
+        .unwrap();
 
     let start = Instant::now();
 

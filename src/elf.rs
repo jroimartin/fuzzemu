@@ -1,35 +1,34 @@
 //! ELF 64-bit parser able to extract the PT_LOAD program headers of a program.
 
 use std::convert::TryInto;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::mmu::{Perm, VirtAddr};
-
-/// ELF executable.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Elf {
-    pub phdrs: Vec<Phdr>,
-    pub entry: VirtAddr,
-}
-
-/// ELF program header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Phdr {
-    pub offset: usize,
-    pub virt_addr: VirtAddr,
-    pub file_size: usize,
-    pub mem_size: usize,
-    pub perms: Perm,
-    pub align: usize,
-}
+use crate::mmu::{Perm, VirtAddr, PERM_EXEC, PERM_READ, PERM_WRITE};
 
 /// Error related to ELF parsing.
 #[derive(Debug)]
 pub enum Error {
-    IoError(io::Error),
+    /// Malformed file
     MalformedFile,
+
+    /// No loadable segments found.
+    NoLoadHeaders,
+
+    /// IO error when reading file.
+    IoError(io::Error),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::MalformedFile => write!(f, "malformed file"),
+            Error::NoLoadHeaders => write!(f, "no LOAD program headers"),
+            Error::IoError(e) => write!(f, "{}", e),
+        }
+    }
 }
 
 impl From<io::Error> for Error {
@@ -38,7 +37,70 @@ impl From<io::Error> for Error {
     }
 }
 
+/// ELF program header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Phdr {
+    offset: usize,
+    virt_addr: VirtAddr,
+    file_size: usize,
+    mem_size: usize,
+    perms: Perm,
+    align: usize,
+}
+
+impl Phdr {
+    /// Offset from the beginning of the file at which the first byte of the
+    /// segment resides.
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Virtual address at which the first byte of the segment resides in
+    /// memory.
+    pub fn virt_addr(&self) -> VirtAddr {
+        self.virt_addr
+    }
+
+    /// Number of bytes in the file image of the segment.
+    pub fn file_size(&self) -> usize {
+        self.file_size
+    }
+
+    /// Number of bytes in the memory image of the segment.
+    pub fn mem_size(&self) -> usize {
+        self.mem_size
+    }
+
+    /// Memory permissions of the segment.
+    pub fn perms(&self) -> Perm {
+        self.perms
+    }
+
+    /// Value to which the segment is aligned in memory and in the file.
+    pub fn align(&self) -> usize {
+        self.align
+    }
+}
+
+/// ELF executable.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Elf {
+    entry: VirtAddr,
+    phdrs: Vec<Phdr>,
+}
+
 impl Elf {
+    /// Virtual address to which the system first tranfers control, thus
+    /// starting the process.
+    pub fn entry(&self) -> VirtAddr {
+        self.entry
+    }
+
+    /// Program headers table.
+    pub fn phdrs(&self) -> Vec<Phdr> {
+        self.phdrs.clone()
+    }
+
     /// Parses an ELF file and returns an `Elf` structure.
     pub fn parse_file<P: AsRef<Path>>(path: P) -> Result<Elf, Error> {
         let contents = fs::read(path)?;
@@ -64,8 +126,7 @@ impl Elf {
 
         // Get number of program headers.
         let e_phnum =
-            u16::from_le_bytes(contents[56..58].try_into().unwrap())
-                as usize;
+            u16::from_le_bytes(contents[56..58].try_into().unwrap()) as usize;
 
         // Parse PT_LOAD program headers.
         let mut phdrs = Vec::with_capacity(e_phnum);
@@ -100,12 +161,27 @@ impl Elf {
                 contents[off + 48..off + 56].try_into().unwrap(),
             );
 
+            // Convert flags to MMU permissions
+            let mut perms = 0;
+            // PF_X = 0x1
+            if p_flags & 1 != 0 {
+                perms |= PERM_EXEC;
+            }
+            // PF_W = 0x2
+            if p_flags & 2 != 0 {
+                perms |= PERM_WRITE;
+            }
+            // PF_R = 0x4
+            if p_flags & 4 != 0 {
+                perms |= PERM_READ;
+            }
+
             let phdr = Phdr {
                 offset: p_offset,
                 virt_addr: VirtAddr(p_vaddr),
                 file_size: p_filesz,
                 mem_size: p_memsz,
-                perms: Perm(p_flags),
+                perms: Perm(perms),
                 align: p_align,
             };
 
@@ -114,7 +190,7 @@ impl Elf {
 
         // Return an error if no PT_LOAD headers were found.
         if phdrs.is_empty() {
-            return Err(Error::MalformedFile);
+            return Err(Error::NoLoadHeaders);
         }
 
         Ok(Elf {
@@ -131,7 +207,7 @@ mod tests {
     use crate::mmu::{PERM_EXEC, PERM_READ, PERM_WRITE};
 
     #[test]
-    fn parse_file() {
+    fn elf_parse_file() {
         let want = Elf {
             phdrs: vec![
                 Phdr {
