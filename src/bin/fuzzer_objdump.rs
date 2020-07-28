@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use riscv_emu::emulator::Emulator;
 
-const NCORES: usize = 8;
+const NCORES: usize = 1;
 
 #[derive(Default)]
 struct Stats {
@@ -25,6 +25,9 @@ fn worker(emu_init: Arc<Emulator>, stats: Arc<Mutex<Stats>>) {
         let it = rdtsc();
         while rdtsc() - it < 500_000_000 {
             emu.reset(&emu_init);
+            if let Err(err) = emu.run() {
+                panic!("VM error: {}", err);
+            }
             local_stats.fuzz_cases += 1;
         }
 
@@ -34,7 +37,9 @@ fn worker(emu_init: Arc<Emulator>, stats: Arc<Mutex<Stats>>) {
 }
 
 fn main() {
-    let emu_init = Emulator::new("testdata/hello", 32 * 1024 * 1024)
+    let mut emu_init = Emulator::new(32 * 1024 * 1024);
+    emu_init
+        .load_program("testdata/hello")
         .unwrap_or_else(|err| {
             eprintln!("error: could not create emulator: {}", err);
             process::exit(1);

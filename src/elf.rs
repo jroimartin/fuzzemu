@@ -26,7 +26,7 @@ impl fmt::Display for Error {
         match self {
             Error::MalformedFile => write!(f, "malformed file"),
             Error::NoLoadHeaders => write!(f, "no LOAD program headers"),
-            Error::IoError(e) => write!(f, "{}", e),
+            Error::IoError(err) => write!(f, "{}", err),
         }
     }
 }
