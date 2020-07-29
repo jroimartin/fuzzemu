@@ -32,6 +32,9 @@ pub enum Error {
     /// Memory address is out of range.
     InvalidAddress,
 
+    /// Integer overflow when computing address.
+    AddressIntegerOverflow,
+
     /// Read access to unitialized memory.
     UnitializedMemory,
 
@@ -43,6 +46,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::InvalidAddress => write!(f, "invalid address"),
+            Error::AddressIntegerOverflow => {
+                write!(f, "integer overflow when computing address")
+            }
             Error::UnitializedMemory => write!(f, "unitialized memory"),
             Error::NotAllowed => write!(f, "not allowed"),
         }
@@ -143,13 +149,17 @@ impl Mmu {
         size: usize,
         perms: Perm,
     ) -> Result<(), Error> {
+        let end = addr
+            .checked_add(size)
+            .ok_or(Error::AddressIntegerOverflow)?;
+
         self.perms
-            .get_mut(*addr..*addr + size)
+            .get_mut(*addr..end)
             .ok_or(Error::InvalidAddress)?
             .iter_mut()
             .for_each(|p| *p = perms);
 
-        self.update_dirty(addr, size);
+        self.update_dirty(addr, size)?;
 
         Ok(())
     }
@@ -163,9 +173,13 @@ impl Mmu {
         size: usize,
         perms: Perm,
     ) -> Result<bool, Error> {
+        let end = addr
+            .checked_add(size)
+            .ok_or(Error::AddressIntegerOverflow)?;
+
         let result = self
             .perms
-            .get(*addr..*addr + size)
+            .get(*addr..end)
             .ok_or(Error::InvalidAddress)?
             .iter()
             .all(|p| **p & *perms == *perms);
@@ -183,7 +197,9 @@ impl Mmu {
             return Err(Error::NotAllowed);
         }
 
-        let end = *addr + size;
+        let end = addr
+            .checked_add(size)
+            .ok_or(Error::AddressIntegerOverflow)?;
 
         // Update memory contents
         self.memory
@@ -199,7 +215,7 @@ impl Mmu {
             .filter(|p| ***p & PERM_RAW != 0)
             .for_each(|p| *p = Perm(**p | PERM_READ));
 
-        self.update_dirty(addr, size);
+        self.update_dirty(addr, size)?;
 
         Ok(())
     }
@@ -212,16 +228,22 @@ impl Mmu {
             return Err(Error::NotAllowed);
         }
 
-        self.memory
-            .get(*addr..*addr + size)
-            .ok_or(Error::InvalidAddress)
+        let end = addr
+            .checked_add(size)
+            .ok_or(Error::AddressIntegerOverflow)?;
+
+        self.memory.get(*addr..end).ok_or(Error::InvalidAddress)
     }
 
     /// Copy the bytes in `src` to the given memory address. This function
     /// does not check memory permissions and does not mark memory as dirty.
     pub fn poke(&mut self, addr: VirtAddr, src: &[u8]) -> Result<(), Error> {
+        let end = addr
+            .checked_add(src.len())
+            .ok_or(Error::AddressIntegerOverflow)?;
+
         self.memory
-            .get_mut(*addr..*addr + src.len())
+            .get_mut(*addr..end)
             .ok_or(Error::InvalidAddress)?
             .copy_from_slice(src);
         Ok(())
@@ -230,19 +252,27 @@ impl Mmu {
     /// Returns a slice with the data stored in the specified memory range.
     /// This function does not check memory permissions.
     pub fn peek(&self, addr: VirtAddr, size: usize) -> Result<&[u8], Error> {
-        self.memory
-            .get(*addr..*addr + size)
-            .ok_or(Error::InvalidAddress)
+        let end = addr
+            .checked_add(size)
+            .ok_or(Error::AddressIntegerOverflow)?;
+
+        self.memory.get(*addr..end).ok_or(Error::InvalidAddress)
     }
 
     /// Compute dirty blocks and bitmap. It does not check if the memory range
     /// is valid.
-    fn update_dirty(&mut self, addr: VirtAddr, size: usize) {
+    fn update_dirty(
+        &mut self,
+        addr: VirtAddr,
+        size: usize,
+    ) -> Result<(), Error> {
         let block_start = *addr / DIRTY_BLOCK_SIZE;
         // Calculate the start of the next block. It takes into account corner
         // cases like `end` being equal to the start of the next block.
-        let block_end =
-            (*addr + size + (DIRTY_BLOCK_SIZE - 1)) / DIRTY_BLOCK_SIZE;
+        let end = addr
+            .checked_add(size)
+            .ok_or(Error::AddressIntegerOverflow)?;
+        let block_end = (end + (DIRTY_BLOCK_SIZE - 1)) / DIRTY_BLOCK_SIZE;
 
         for block in block_start..block_end {
             let idx = block / 64;
@@ -253,6 +283,8 @@ impl Mmu {
                 self.dirty.push(block);
             }
         }
+
+        Ok(())
     }
 }
 
@@ -312,12 +344,31 @@ mod tests {
     }
 
     #[test]
+    fn mmu_check_perms_integer_overflow() {
+        let mut mmu = Mmu::new(16);
+        match mmu.set_perms(VirtAddr(usize::MAX), 2, Perm(PERM_WRITE)) {
+            Err(Error::AddressIntegerOverflow) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
+    }
+
+    #[test]
     fn mmu_write_read() {
         let mut mmu = Mmu::new(4);
         mmu.set_perms(VirtAddr(0), 4, Perm(PERM_READ | PERM_WRITE))
             .unwrap();
         mmu.write(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
         let got = mmu.read(VirtAddr(0), 4).unwrap();
+
+        assert_eq!(got, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn mmu_poke_peek() {
+        let mut mmu = Mmu::new(4);
+        mmu.poke(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
+        let got = mmu.peek(VirtAddr(0), 4).unwrap();
 
         assert_eq!(got, &[1, 2, 3, 4]);
     }
