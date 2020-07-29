@@ -159,7 +159,7 @@ impl Mmu {
             .iter_mut()
             .for_each(|p| *p = perms);
 
-        self.update_dirty(addr, size)?;
+        self.update_dirty(addr, size);
 
         Ok(())
     }
@@ -179,14 +179,14 @@ impl Mmu {
 
         let range = self.perms.get(*addr..end).ok_or(Error::InvalidAddress)?;
         for p in range.iter() {
-            if (*perms & PERM_READ != 0) && (**p & PERM_RAW != 0){
+            if (*perms & PERM_READ != 0) && (**p & PERM_RAW != 0) {
                 return Err(Error::UnitializedMemory);
             }
 
             if **p & *perms != *perms {
                 return Err(Error::NotAllowed);
             }
-        };
+        }
 
         Ok(())
     }
@@ -217,7 +217,7 @@ impl Mmu {
             .filter(|p| ***p & PERM_RAW != 0)
             .for_each(|p| *p = Perm((**p | PERM_READ) & !PERM_RAW));
 
-        self.update_dirty(addr, size)?;
+        self.update_dirty(addr, size);
 
         Ok(())
     }
@@ -261,18 +261,12 @@ impl Mmu {
 
     /// Compute dirty blocks and bitmap. It does not check if the memory range
     /// is valid.
-    fn update_dirty(
-        &mut self,
-        addr: VirtAddr,
-        size: usize,
-    ) -> Result<(), Error> {
+    fn update_dirty(&mut self, addr: VirtAddr, size: usize) {
         let block_start = *addr / DIRTY_BLOCK_SIZE;
         // Calculate the start of the next block. It takes into account corner
         // cases like `end` being equal to the start of the next block.
-        let end = addr
-            .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow)?;
-        let block_end = (end + (DIRTY_BLOCK_SIZE - 1)) / DIRTY_BLOCK_SIZE;
+        let block_end =
+            (*addr + size + (DIRTY_BLOCK_SIZE - 1)) / DIRTY_BLOCK_SIZE;
 
         for block in block_start..block_end {
             let idx = block / 64;
@@ -283,8 +277,6 @@ impl Mmu {
                 self.dirty.push(block);
             }
         }
-
-        Ok(())
     }
 }
 
@@ -427,8 +419,7 @@ mod tests {
     #[test]
     fn mmu_raw_unitialized() {
         let mut mmu = Mmu::new(4);
-        mmu.set_perms(VirtAddr(0), 2, Perm(PERM_READ))
-            .unwrap();
+        mmu.set_perms(VirtAddr(0), 2, Perm(PERM_READ)).unwrap();
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
         match mmu.read(VirtAddr(1), 2) {
@@ -441,8 +432,7 @@ mod tests {
     #[test]
     fn mmu_raw_not_allowed() {
         let mut mmu = Mmu::new(4);
-        mmu.set_perms(VirtAddr(0), 2, Perm(PERM_WRITE))
-            .unwrap();
+        mmu.set_perms(VirtAddr(0), 2, Perm(PERM_WRITE)).unwrap();
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
         match mmu.read(VirtAddr(1), 2) {
