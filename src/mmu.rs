@@ -172,19 +172,23 @@ impl Mmu {
         addr: VirtAddr,
         size: usize,
         perms: Perm,
-    ) -> Result<bool, Error> {
+    ) -> Result<(), Error> {
         let end = addr
             .checked_add(size)
             .ok_or(Error::AddressIntegerOverflow)?;
 
-        let result = self
-            .perms
-            .get(*addr..end)
-            .ok_or(Error::InvalidAddress)?
-            .iter()
-            .all(|p| **p & *perms == *perms);
+        let range = self.perms.get(*addr..end).ok_or(Error::InvalidAddress)?;
+        for p in range.iter() {
+            if (*perms & PERM_READ != 0) && (**p & PERM_RAW != 0){
+                return Err(Error::UnitializedMemory);
+            }
 
-        Ok(result)
+            if **p & *perms != *perms {
+                return Err(Error::NotAllowed);
+            }
+        };
+
+        Ok(())
     }
 
     /// Copy the bytes in `src` to the given memory address. This function will
@@ -193,9 +197,7 @@ impl Mmu {
         let size = src.len();
 
         // Check if the destination memory range is writable.
-        if !self.check_perms(addr, size, Perm(PERM_WRITE))? {
-            return Err(Error::NotAllowed);
-        }
+        self.check_perms(addr, size, Perm(PERM_WRITE))?;
 
         let end = addr
             .checked_add(size)
@@ -207,13 +209,13 @@ impl Mmu {
             .ok_or(Error::InvalidAddress)?
             .copy_from_slice(src);
 
-        // Add PERM_READ in case of RAW.
+        // Add PERM_READ and remove PERM_RAW in case of RAW.
         self.perms
             .get_mut(*addr..end)
             .ok_or(Error::InvalidAddress)?
             .iter_mut()
             .filter(|p| ***p & PERM_RAW != 0)
-            .for_each(|p| *p = Perm(**p | PERM_READ));
+            .for_each(|p| *p = Perm((**p | PERM_READ) & !PERM_RAW));
 
         self.update_dirty(addr, size)?;
 
@@ -224,9 +226,7 @@ impl Mmu {
     /// This function will fail if the source memory is not readable.
     pub fn read(&self, addr: VirtAddr, size: usize) -> Result<&[u8], Error> {
         // Check if the source memory range is readable.
-        if !self.check_perms(addr, size, Perm(PERM_READ))? {
-            return Err(Error::NotAllowed);
-        }
+        self.check_perms(addr, size, Perm(PERM_READ))?;
 
         let end = addr
             .checked_add(size)
@@ -318,19 +318,18 @@ mod tests {
         mmu.set_perms(VirtAddr(0), 8, Perm(PERM_WRITE | PERM_READ))
             .unwrap();
 
-        assert!(mmu
-            .check_perms(VirtAddr(0), 8, Perm(PERM_WRITE | PERM_READ))
-            .unwrap());
+        mmu.check_perms(VirtAddr(0), 8, Perm(PERM_WRITE | PERM_READ))
+            .unwrap();
     }
 
     #[test]
+    #[should_panic]
     fn mmu_check_perms_subset() {
         let mut mmu = Mmu::new(16);
         mmu.set_perms(VirtAddr(0), 8, Perm(PERM_WRITE)).unwrap();
 
-        assert!(!mmu
-            .check_perms(VirtAddr(0), 8, Perm(PERM_WRITE | PERM_READ))
-            .unwrap());
+        mmu.check_perms(VirtAddr(0), 8, Perm(PERM_WRITE | PERM_READ))
+            .unwrap();
     }
 
     #[test]
@@ -346,11 +345,20 @@ mod tests {
     #[test]
     fn mmu_check_perms_integer_overflow() {
         let mut mmu = Mmu::new(16);
-        match mmu.set_perms(VirtAddr(usize::MAX), 2, Perm(PERM_WRITE)) {
+        match mmu.set_perms(VirtAddr(usize::MAX), 1, Perm(PERM_WRITE)) {
             Err(Error::AddressIntegerOverflow) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
+    }
+
+    #[test]
+    fn mmu_poke_peek() {
+        let mut mmu = Mmu::new(4);
+        mmu.poke(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
+        let got = mmu.peek(VirtAddr(0), 4).unwrap();
+
+        assert_eq!(got, &[1, 2, 3, 4]);
     }
 
     #[test]
@@ -360,15 +368,6 @@ mod tests {
             .unwrap();
         mmu.write(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
         let got = mmu.read(VirtAddr(0), 4).unwrap();
-
-        assert_eq!(got, &[1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn mmu_poke_peek() {
-        let mut mmu = Mmu::new(4);
-        mmu.poke(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
-        let got = mmu.peek(VirtAddr(0), 4).unwrap();
 
         assert_eq!(got, &[1, 2, 3, 4]);
     }
@@ -404,12 +403,53 @@ mod tests {
         assert_eq!(
             &mmu.perms[..4],
             &[
-                Perm(PERM_WRITE | PERM_READ | PERM_RAW),
-                Perm(PERM_WRITE | PERM_READ | PERM_RAW),
+                Perm(PERM_WRITE | PERM_READ),
+                Perm(PERM_WRITE | PERM_READ),
                 Perm(PERM_WRITE | PERM_RAW),
                 Perm(0)
             ]
         );
+    }
+
+    #[test]
+    fn mmu_raw_ok() {
+        let mut mmu = Mmu::new(4);
+        mmu.set_perms(VirtAddr(0), 2, Perm(PERM_READ | PERM_WRITE))
+            .unwrap();
+        mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
+            .unwrap();
+        mmu.write(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
+        let got = mmu.read(VirtAddr(0), 4).unwrap();
+
+        assert_eq!(got, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn mmu_raw_unitialized() {
+        let mut mmu = Mmu::new(4);
+        mmu.set_perms(VirtAddr(0), 2, Perm(PERM_READ))
+            .unwrap();
+        mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
+            .unwrap();
+        match mmu.read(VirtAddr(1), 2) {
+            Err(Error::UnitializedMemory) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
+    }
+
+    #[test]
+    fn mmu_raw_not_allowed() {
+        let mut mmu = Mmu::new(4);
+        mmu.set_perms(VirtAddr(0), 2, Perm(PERM_WRITE))
+            .unwrap();
+        mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
+            .unwrap();
+        match mmu.read(VirtAddr(1), 2) {
+            Err(Error::NotAllowed) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
     }
 
     #[test]
