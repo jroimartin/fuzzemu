@@ -9,11 +9,15 @@ use std::path::Path;
 use crate::elf::{self, Elf};
 use crate::mmu::{self, Mmu, Perm, VirtAddr, PERM_EXEC};
 
+const DEBUG: bool = false;
+
 /// Emulator error.
 #[derive(Debug)]
 pub enum VmExit {
     EBreak,
     ECall,
+
+    ProgramExit(u64),
 
     AddressMisaligned,
     InvalidInstruction,
@@ -31,6 +35,7 @@ impl fmt::Display for VmExit {
         match self {
             VmExit::EBreak => write!(f, "EBREAK"),
             VmExit::ECall => write!(f, "ECALL"),
+            VmExit::ProgramExit(code) => write!(f, "program exit: {}", code),
             VmExit::AddressMisaligned => {
                 write!(f, "address-missaligned exception")
             }
@@ -440,9 +445,11 @@ impl Emulator {
             return Err(VmExit::AddressMisaligned);
         }
 
-        eprintln!("---");
-        eprintln!("{}", self);
-        eprintln!("{:#010x}: {:08x} {:07b}", pc, inst, opcode);
+        if DEBUG {
+            eprintln!("---");
+            eprintln!("{}", self);
+            eprintln!("{:#010x}: {:08x} {:07b}", pc, inst, opcode);
+        }
 
         match opcode {
             0b0110111 => {
@@ -693,7 +700,6 @@ impl Emulator {
                         self.set_reg(dec.rd, rs1 & imm)?;
                     }
                     0b001 => {
-                        println!("{:012b}", dec.imm);
                         match dec.imm as u32 >> 6 {
                             0b000000 => {
                                 // SLLI

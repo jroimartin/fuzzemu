@@ -308,7 +308,8 @@ impl Mmu {
             .checked_add(size)
             .ok_or(Error::AddressIntegerOverflow { addr, size })?;
 
-        let src = self.memory
+        let src = self
+            .memory
             .get(*addr..end)
             .ok_or(Error::InvalidAddress { addr, size })?;
 
@@ -342,7 +343,8 @@ impl Mmu {
             .checked_add(size)
             .ok_or(Error::AddressIntegerOverflow { addr, size })?;
 
-        let src = self.memory
+        let src = self
+            .memory
             .get(*addr..end)
             .ok_or(Error::InvalidAddress { addr, size })?;
 

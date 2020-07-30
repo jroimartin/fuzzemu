@@ -18,7 +18,47 @@ fn rdtsc() -> u64 {
 }
 
 fn handle_syscall(emu: &mut Emulator) -> Result<(), VmExit> {
-    todo!()
+    let syscall_number = emu.get_reg(RegAlias::A7)?;
+    let pc = emu.get_reg(RegAlias::Pc)?;
+
+    match syscall_number {
+        57 => {
+            // close
+            emu.set_reg(RegAlias::A0, !0)?;
+        }
+        64 => {
+            // write
+            let fd = emu.get_reg(RegAlias::A0)?;
+            let buf_ptr = emu.get_reg(RegAlias::A1)?;
+            let count = emu.get_reg(RegAlias::A2)?;
+
+            let mut bytes = vec![0; count as usize];
+            emu.mmu.peek(VirtAddr(buf_ptr as usize), &mut bytes)?;
+
+            let buf = String::from_utf8(bytes).unwrap();
+            println!("{}", buf);
+
+            emu.set_reg(RegAlias::A0, !0)?;
+        }
+        80 => {
+            // fstat
+            emu.set_reg(RegAlias::A0, !0)?;
+        }
+        93 => {
+            // exit
+            let code = emu.get_reg(RegAlias::A0)?;
+            return Err(VmExit::ProgramExit(code));
+        }
+        214 => {
+            // brk
+            emu.set_reg(RegAlias::A0, !0)?;
+        }
+        _ => todo!("syscall"),
+    }
+
+    emu.set_reg(RegAlias::Pc, pc.wrapping_add(4))?;
+
+    Ok(())
 }
 
 fn worker(emu_init: Arc<Emulator>, stats: Arc<Mutex<Stats>>) {
