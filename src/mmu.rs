@@ -29,35 +29,44 @@ const DIRTY_BLOCK_SIZE: usize = 1024;
 /// Memory error.
 #[derive(Debug)]
 pub enum Error {
-    /// Memory address is out of range `(vaddr, size)`.
-    InvalidAddress(VirtAddr, usize),
+    /// Memory address is out of range.
+    InvalidAddress { addr: VirtAddr, size: usize },
 
-    /// Integer overflow when computing address `(vaddr, size)`.
-    AddressIntegerOverflow(VirtAddr, usize),
+    /// Integer overflow when computing address.
+    AddressIntegerOverflow { addr: VirtAddr, size: usize },
 
-    /// Read access to unitialized memory `(vaddr)`.
-    UnitializedMemory(VirtAddr),
+    /// Read access to unitialized memory.
+    UnitializedMemory { addr: VirtAddr },
 
-    /// Permissions do not allow memory access `(vaddr, expected, current)`.
-    NotAllowed(VirtAddr, Perm, Perm),
+    /// Permissions do not allow memory access. Associated values:
+    /// `(vaddr, expected, current)`.
+    NotAllowed {
+        addr: VirtAddr,
+        exp_perms: Perm,
+        cur_perms: Perm,
+    },
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::InvalidAddress(vaddr, size) => {
-                write!(f, "invalid address: vaddr={} size={}", vaddr, size)
+            Error::InvalidAddress { addr, size } => {
+                write!(f, "invalid address: vaddr={} size={}", addr, size)
             }
-            Error::AddressIntegerOverflow(vaddr, size) => {
-                write!(f, "integer overflow: vaddr={} size={}", vaddr, size)
+            Error::AddressIntegerOverflow { addr, size } => {
+                write!(f, "integer overflow: vaddr={} size={}", addr, size)
             }
-            Error::UnitializedMemory(vaddr) => {
-                write!(f, "unitialized memory: vaddr={}", vaddr)
+            Error::UnitializedMemory { addr } => {
+                write!(f, "unitialized memory: vaddr={}", addr)
             }
-            Error::NotAllowed(vaddr, exp, cur) => write!(
+            Error::NotAllowed {
+                addr,
+                exp_perms,
+                cur_perms,
+            } => write!(
                 f,
                 "not allowed: vaddr={} exp={} cur={}",
-                vaddr, exp, cur
+                addr, exp_perms, cur_perms
             ),
         }
     }
@@ -191,11 +200,11 @@ impl Mmu {
     ) -> Result<(), Error> {
         let end = addr
             .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow(addr, size))?;
+            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
 
         self.perms
             .get_mut(*addr..end)
-            .ok_or(Error::InvalidAddress(addr, size))?
+            .ok_or(Error::InvalidAddress { addr, size })?
             .iter_mut()
             .for_each(|p| *p = perms);
 
@@ -215,12 +224,12 @@ impl Mmu {
     ) -> Result<(), Error> {
         let end = addr
             .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow(addr, size))?;
+            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
 
         let range = self
             .perms
             .get(*addr..end)
-            .ok_or(Error::InvalidAddress(addr, size))?;
+            .ok_or(Error::InvalidAddress { addr, size })?;
 
         for (i, p) in range.iter().enumerate() {
             // If we reach this point, we know that addr + size does not
@@ -228,11 +237,17 @@ impl Mmu {
             // checked_add to calculate the following virtual addresses.
 
             if (*perms & PERM_READ != 0) && (**p & PERM_RAW != 0) {
-                return Err(Error::UnitializedMemory(VirtAddr(*addr + i)));
+                return Err(Error::UnitializedMemory {
+                    addr: VirtAddr(*addr + i),
+                });
             }
 
             if **p & *perms != *perms {
-                return Err(Error::NotAllowed(VirtAddr(*addr + i), perms, *p));
+                return Err(Error::NotAllowed {
+                    addr: VirtAddr(*addr + i),
+                    exp_perms: perms,
+                    cur_perms: *p,
+                });
             }
         }
 
@@ -249,18 +264,18 @@ impl Mmu {
 
         let end = addr
             .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow(addr, size))?;
+            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
 
         // Update memory contents
         self.memory
             .get_mut(*addr..end)
-            .ok_or(Error::InvalidAddress(addr, size))?
+            .ok_or(Error::InvalidAddress { addr, size })?
             .copy_from_slice(src);
 
         // Add PERM_READ and remove PERM_RAW in case of RAW.
         self.perms
             .get_mut(*addr..end)
-            .ok_or(Error::InvalidAddress(addr, size))?
+            .ok_or(Error::InvalidAddress { addr, size })?
             .iter_mut()
             .filter(|p| ***p & PERM_RAW != 0)
             .for_each(|p| *p = Perm((**p | PERM_READ) & !PERM_RAW));
@@ -290,11 +305,11 @@ impl Mmu {
 
         let end = addr
             .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow(addr, size))?;
+            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
 
         self.memory
             .get(*addr..end)
-            .ok_or(Error::InvalidAddress(addr, size))
+            .ok_or(Error::InvalidAddress { addr, size })
     }
 
     /// Copy the bytes in `src` to the given memory address. This function
@@ -304,11 +319,11 @@ impl Mmu {
 
         let end = addr
             .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow(addr, size))?;
+            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
 
         self.memory
             .get_mut(*addr..end)
-            .ok_or(Error::InvalidAddress(addr, size))?
+            .ok_or(Error::InvalidAddress { addr, size })?
             .copy_from_slice(src);
         Ok(())
     }
@@ -318,11 +333,11 @@ impl Mmu {
     pub fn peek(&self, addr: VirtAddr, size: usize) -> Result<&[u8], Error> {
         let end = addr
             .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow(addr, size))?;
+            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
 
         self.memory
             .get(*addr..end)
-            .ok_or(Error::InvalidAddress(addr, size))
+            .ok_or(Error::InvalidAddress { addr, size })
     }
 
     /// Compute dirty blocks and bitmap. It does not check if the memory range
@@ -394,7 +409,7 @@ mod tests {
     fn mmu_check_perms_oob() {
         let mut mmu = Mmu::new(16);
         match mmu.set_perms(VirtAddr(5), 16, Perm(PERM_WRITE)) {
-            Err(Error::InvalidAddress(..)) => return,
+            Err(Error::InvalidAddress { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
@@ -404,7 +419,7 @@ mod tests {
     fn mmu_check_perms_integer_overflow() {
         let mut mmu = Mmu::new(16);
         match mmu.set_perms(VirtAddr(usize::MAX), 1, Perm(PERM_WRITE)) {
-            Err(Error::AddressIntegerOverflow(..)) => return,
+            Err(Error::AddressIntegerOverflow { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
@@ -434,7 +449,7 @@ mod tests {
     fn mmu_write_not_allowed() {
         let mut mmu = Mmu::new(4);
         match mmu.write(VirtAddr(0), &[1, 2, 3, 4]) {
-            Err(Error::NotAllowed(..)) => return,
+            Err(Error::NotAllowed { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
@@ -444,7 +459,7 @@ mod tests {
     fn mmu_read_not_allowed() {
         let mmu = Mmu::new(4);
         match mmu.read(VirtAddr(0), 2) {
-            Err(Error::NotAllowed(..)) => return,
+            Err(Error::NotAllowed { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
@@ -489,7 +504,7 @@ mod tests {
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
         match mmu.read(VirtAddr(1), 2) {
-            Err(Error::UnitializedMemory(_)) => return,
+            Err(Error::UnitializedMemory { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
@@ -502,7 +517,7 @@ mod tests {
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
         match mmu.read(VirtAddr(1), 2) {
-            Err(Error::NotAllowed(..)) => return,
+            Err(Error::NotAllowed { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
