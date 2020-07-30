@@ -38,8 +38,7 @@ pub enum Error {
     /// Read access to unitialized memory.
     UnitializedMemory { addr: VirtAddr },
 
-    /// Permissions do not allow memory access. Associated values:
-    /// `(vaddr, expected, current)`.
+    /// Permissions do not allow memory access.
     NotAllowed {
         addr: VirtAddr,
         exp_perms: Perm,
