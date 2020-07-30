@@ -1,6 +1,5 @@
 //! RISC-V emulator (little-endian rv64i only).
 
-use std::convert::TryInto;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -12,57 +11,59 @@ use crate::mmu::{self, Mmu, Perm, VirtAddr, PERM_EXEC};
 
 /// Emulator error.
 #[derive(Debug)]
-pub enum Error {
+pub enum VmExit {
+    EBreak,
+    ECall,
+
     AddressMisaligned,
     InvalidInstruction,
     InvalidRegister,
     InvalidMemorySegment,
     UnimplementedInstruction,
-    EBreak,
-    ECall,
-
-    ElfError(elf::Error),
-    MmuError(mmu::Error),
 
     IoError(io::Error),
+    ElfError(elf::Error),
+    MmuError(mmu::Error),
 }
 
-impl fmt::Display for Error {
+impl fmt::Display for VmExit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::AddressMisaligned => {
+            VmExit::EBreak => write!(f, "EBREAK"),
+            VmExit::ECall => write!(f, "ECALL"),
+            VmExit::AddressMisaligned => {
                 write!(f, "address-missaligned exception")
             }
-            Error::InvalidInstruction => write!(f, "invalid instruction"),
-            Error::InvalidRegister => write!(f, "invalid register"),
-            Error::InvalidMemorySegment => write!(f, "invalid memory segment"),
-            Error::UnimplementedInstruction => {
+            VmExit::InvalidInstruction => write!(f, "invalid instruction"),
+            VmExit::InvalidRegister => write!(f, "invalid register"),
+            VmExit::InvalidMemorySegment => {
+                write!(f, "invalid memory segment")
+            }
+            VmExit::UnimplementedInstruction => {
                 write!(f, "unimplemented instruction")
             }
-            Error::EBreak => write!(f, "EBREAK"),
-            Error::ECall => write!(f, "ECALL"),
-            Error::ElfError(err) => write!(f, "ELF error: {}", err),
-            Error::MmuError(err) => write!(f, "MMU error: {}", err),
-            Error::IoError(err) => write!(f, "IO error: {}", err),
+            VmExit::IoError(err) => write!(f, "IO error: {}", err),
+            VmExit::ElfError(err) => write!(f, "ELF error: {}", err),
+            VmExit::MmuError(err) => write!(f, "MMU error: {}", err),
         }
     }
 }
 
-impl From<mmu::Error> for Error {
-    fn from(error: mmu::Error) -> Error {
-        Error::MmuError(error)
+impl From<io::Error> for VmExit {
+    fn from(error: io::Error) -> VmExit {
+        VmExit::IoError(error)
     }
 }
 
-impl From<elf::Error> for Error {
-    fn from(error: elf::Error) -> Error {
-        Error::ElfError(error)
+impl From<mmu::Error> for VmExit {
+    fn from(error: mmu::Error) -> VmExit {
+        VmExit::MmuError(error)
     }
 }
 
-impl From<io::Error> for Error {
-    fn from(error: io::Error) -> Error {
-        Error::IoError(error)
+impl From<elf::Error> for VmExit {
+    fn from(error: elf::Error) -> VmExit {
+        VmExit::ElfError(error)
     }
 }
 
@@ -78,26 +79,26 @@ impl Deref for Reg {
     }
 }
 
-/// CPU register by name. Note that `Reg` implements the trait `From<RegName>`,
-/// which simplifies referencing Registers by name.
+/// Alternative name for CPU register. Note that `Reg` implements the trait
+/// `From<RegAlias>`, which simplifies referencing Registers by alias.
 ///
 /// # Examples
 ///
 /// All the following calls to `reg_set` are equivalent:
 ///
 /// ```
-/// use riscv_emu::emulator::{Emulator, Reg, RegName};
+/// use riscv_emu::emulator::{Emulator, Reg, RegAlias};
 ///
 /// let mut emulator = Emulator::new(1024);
 ///
-/// emulator.get_reg(RegName::Zero);
-/// emulator.get_reg(Reg::from(RegName::Zero));
-/// emulator.get_reg(Reg(RegName::Zero as u32));
+/// emulator.get_reg(RegAlias::Zero);
+/// emulator.get_reg(Reg::from(RegAlias::Zero));
+/// emulator.get_reg(Reg(RegAlias::Zero as u32));
 /// emulator.get_reg(Reg(0));
 /// ```
 ///
 /// For obvious reasons, the first options is recommended.
-pub enum RegName {
+pub enum RegAlias {
     Zero = 0,
     Ra,
     Sp,
@@ -133,9 +134,9 @@ pub enum RegName {
     Pc,
 }
 
-impl From<RegName> for Reg {
-    fn from(name: RegName) -> Reg {
-        Reg(name as u32)
+impl From<RegAlias> for Reg {
+    fn from(alias: RegAlias) -> Reg {
+        Reg(alias as u32)
     }
 }
 
@@ -334,7 +335,7 @@ impl Emulator {
     pub fn load_program<P: AsRef<Path>>(
         &mut self,
         program: P,
-    ) -> Result<(), Error> {
+    ) -> Result<(), VmExit> {
         let contents = fs::read(program)?;
         let elf = Elf::parse(&contents)?;
 
@@ -342,11 +343,11 @@ impl Emulator {
             let file_offset = phdr.offset();
             let file_end = file_offset
                 .checked_add(phdr.file_size())
-                .ok_or(Error::InvalidMemorySegment)?;
+                .ok_or(VmExit::InvalidMemorySegment)?;
 
             let file_bytes = contents
                 .get(file_offset..file_end)
-                .ok_or(Error::InvalidMemorySegment)?;
+                .ok_or(VmExit::InvalidMemorySegment)?;
 
             let mem_start = phdr.virt_addr();
             let mem_size = phdr.mem_size();
@@ -356,7 +357,7 @@ impl Emulator {
         }
 
         // Place the program counter in the entrypoint.
-        self.set_reg(RegName::Pc, *elf.entry() as u64)?;
+        self.set_reg(RegAlias::Pc, *elf.entry() as u64)?;
 
         Ok(())
     }
@@ -380,11 +381,11 @@ impl Emulator {
         &mut self,
         reg: T,
         val: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<(), VmExit> {
         let reg = *reg.into() as usize;
 
         if reg >= self.regs.len() {
-            return Err(Error::InvalidRegister);
+            return Err(VmExit::InvalidRegister);
         }
 
         // The zero register is always 0.
@@ -395,11 +396,11 @@ impl Emulator {
     }
 
     /// Returns the value stored in the register `reg`.
-    pub fn get_reg<T: Into<Reg>>(&self, reg: T) -> Result<u64, Error> {
+    pub fn get_reg<T: Into<Reg>>(&self, reg: T) -> Result<u64, VmExit> {
         let reg = *reg.into() as usize;
 
         if reg >= self.regs.len() {
-            return Err(Error::InvalidRegister);
+            return Err(VmExit::InvalidRegister);
         }
 
         // The zero register is always 0.
@@ -411,15 +412,18 @@ impl Emulator {
     }
 
     /// Emulates until vm exit or error.
-    pub fn run(&mut self) -> Result<(), Error> {
+    pub fn run(&mut self) -> Result<(), VmExit> {
         loop {
-            let pc = self.get_reg(RegName::Pc)?;
-            let bytes = self.mmu.read_with_perms(
+            let pc = self.get_reg(RegAlias::Pc)?;
+
+            let mut bytes = [0u8; 4];
+            self.mmu.read_with_perms(
                 VirtAddr(pc as usize),
-                4,
+                &mut bytes,
                 Perm(PERM_EXEC),
             )?;
-            let inst = u32::from_le_bytes(bytes.try_into().unwrap());
+
+            let inst = u32::from_le_bytes(bytes);
 
             self.run_instruction(inst)?;
         }
@@ -427,13 +431,13 @@ impl Emulator {
 
     /// Emulates a single instruction, updating the internal state of the
     /// emulator.
-    fn run_instruction(&mut self, inst: u32) -> Result<(), Error> {
+    fn run_instruction(&mut self, inst: u32) -> Result<(), VmExit> {
         let opcode = inst & 0b111_1111;
 
-        let pc = self.get_reg(RegName::Pc)?;
+        let pc = self.get_reg(RegAlias::Pc)?;
 
         if pc & 3 != 0 {
-            return Err(Error::AddressMisaligned);
+            return Err(VmExit::AddressMisaligned);
         }
 
         eprintln!("---");
@@ -460,7 +464,7 @@ impl Emulator {
                 let offset = dec.imm as u64;
 
                 self.set_reg(dec.rd, pc.wrapping_add(4))?;
-                self.set_reg(RegName::Pc, pc.wrapping_add(offset))?;
+                self.set_reg(RegAlias::Pc, pc.wrapping_add(offset))?;
                 return Ok(());
             }
             0b1100111 => {
@@ -474,12 +478,12 @@ impl Emulator {
                         // JALR
                         self.set_reg(dec.rd, pc.wrapping_add(4))?;
                         self.set_reg(
-                            RegName::Pc,
+                            RegAlias::Pc,
                             rs1.wrapping_add(offset) >> 1 << 1,
                         )?;
                         return Ok(());
                     }
-                    _ => return Err(Error::UnimplementedInstruction),
+                    _ => return Err(VmExit::UnimplementedInstruction),
                 }
             }
             0b1100011 => {
@@ -494,7 +498,7 @@ impl Emulator {
                         // BEQ
                         if rs1 == rs2 {
                             self.set_reg(
-                                RegName::Pc,
+                                RegAlias::Pc,
                                 pc.wrapping_add(offset),
                             )?;
                             return Ok(());
@@ -504,7 +508,7 @@ impl Emulator {
                         // BNE
                         if rs1 != rs2 {
                             self.set_reg(
-                                RegName::Pc,
+                                RegAlias::Pc,
                                 pc.wrapping_add(offset),
                             )?;
                             return Ok(());
@@ -514,7 +518,7 @@ impl Emulator {
                         // BLT
                         if (rs1 as i64) < (rs2 as i64) {
                             self.set_reg(
-                                RegName::Pc,
+                                RegAlias::Pc,
                                 pc.wrapping_add(offset),
                             )?;
                             return Ok(());
@@ -524,7 +528,7 @@ impl Emulator {
                         // BGE
                         if (rs1 as i64) >= (rs2 as i64) {
                             self.set_reg(
-                                RegName::Pc,
+                                RegAlias::Pc,
                                 pc.wrapping_add(offset),
                             )?;
                             return Ok(());
@@ -534,7 +538,7 @@ impl Emulator {
                         // BLTU
                         if rs1 < rs2 {
                             self.set_reg(
-                                RegName::Pc,
+                                RegAlias::Pc,
                                 pc.wrapping_add(offset),
                             )?;
                             return Ok(());
@@ -544,13 +548,13 @@ impl Emulator {
                         // BGEU
                         if rs1 >= rs2 {
                             self.set_reg(
-                                RegName::Pc,
+                                RegAlias::Pc,
                                 pc.wrapping_add(offset),
                             )?;
                             return Ok(());
                         }
                     }
-                    _ => return Err(Error::InvalidInstruction),
+                    _ => return Err(VmExit::InvalidInstruction),
                 }
             }
             0b0000011 => {
@@ -561,39 +565,58 @@ impl Emulator {
                 let vaddr = rs1.wrapping_add(offset);
 
                 let vaddr = VirtAddr(vaddr as usize);
-                let bytes = self.mmu.read(vaddr, 8)?;
-                let value = u64::from_le_bytes(bytes.try_into().unwrap());
 
                 match dec.funct3 {
                     0b000 => {
                         // LB
+                        let mut bytes = [0u8; 1];
+                        self.mmu.read(vaddr, &mut bytes)?;
+                        let value = bytes[0];
                         self.set_reg(dec.rd, value as i8 as u64)?;
                     }
                     0b001 => {
                         // LH
+                        let mut bytes = [0u8; 2];
+                        self.mmu.read(vaddr, &mut bytes)?;
+                        let value = u16::from_le_bytes(bytes);
                         self.set_reg(dec.rd, value as i16 as u64)?;
                     }
                     0b010 => {
                         // LW
+                        let mut bytes = [0u8; 4];
+                        self.mmu.read(vaddr, &mut bytes)?;
+                        let value = u32::from_le_bytes(bytes);
                         self.set_reg(dec.rd, value as i32 as u64)?;
                     }
                     0b100 => {
                         // LBU
-                        self.set_reg(dec.rd, value as u8 as u64)?;
+                        let mut bytes = [0u8; 1];
+                        self.mmu.read(vaddr, &mut bytes)?;
+                        let value = bytes[0];
+                        self.set_reg(dec.rd, value as u64)?;
                     }
                     0b101 => {
                         // LHU
-                        self.set_reg(dec.rd, value as u16 as u64)?;
+                        let mut bytes = [0u8; 2];
+                        self.mmu.read(vaddr, &mut bytes)?;
+                        let value = u16::from_le_bytes(bytes);
+                        self.set_reg(dec.rd, value as u64)?;
                     }
                     0b110 => {
                         // LWU
-                        self.set_reg(dec.rd, value as u32 as u64)?;
+                        let mut bytes = [0u8; 4];
+                        self.mmu.read(vaddr, &mut bytes)?;
+                        let value = u32::from_le_bytes(bytes);
+                        self.set_reg(dec.rd, value as u64)?;
                     }
                     0b011 => {
                         // LD
+                        let mut bytes = [0u8; 8];
+                        self.mmu.read(vaddr, &mut bytes)?;
+                        let value = u64::from_le_bytes(bytes);
                         self.set_reg(dec.rd, value)?;
                     }
-                    _ => return Err(Error::InvalidInstruction),
+                    _ => return Err(VmExit::InvalidInstruction),
                 }
             }
             0b0100011 => {
@@ -610,24 +633,24 @@ impl Emulator {
                     0b000 => {
                         //SB
                         let value = (rs2 as u8).to_le_bytes();
-                        self.mmu.write(vaddr, &value[..])?;
+                        self.mmu.write(vaddr, &value)?;
                     }
                     0b001 => {
                         //SH
                         let value = (rs2 as u16).to_le_bytes();
-                        self.mmu.write(vaddr, &value[..])?;
+                        self.mmu.write(vaddr, &value)?;
                     }
                     0b010 => {
                         //SW
                         let value = (rs2 as u32).to_le_bytes();
-                        self.mmu.write(vaddr, &value[..])?;
+                        self.mmu.write(vaddr, &value)?;
                     }
                     0b011 => {
                         //SD
                         let value = rs2.to_le_bytes();
-                        self.mmu.write(vaddr, &value[..])?;
+                        self.mmu.write(vaddr, &value)?;
                     }
-                    _ => return Err(Error::InvalidInstruction),
+                    _ => return Err(VmExit::InvalidInstruction),
                 }
             }
             0b0010011 => {
@@ -677,7 +700,7 @@ impl Emulator {
                                 let shamt = dec.imm & 0b11_1111;
                                 self.set_reg(dec.rd, rs1 << shamt)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b101 => {
@@ -693,10 +716,10 @@ impl Emulator {
                                 let value = ((rs1 as i64) >> shamt) as u64;
                                 self.set_reg(dec.rd, value)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
-                    _ => return Err(Error::InvalidInstruction),
+                    _ => return Err(VmExit::InvalidInstruction),
                 }
             }
             0b0110011 => {
@@ -716,7 +739,7 @@ impl Emulator {
                                 // SUB
                                 self.set_reg(dec.rd, rs1.wrapping_sub(rs2))?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b001 => {
@@ -726,7 +749,7 @@ impl Emulator {
                                 let shamt = rs2 & 0b1_1111;
                                 self.set_reg(dec.rd, rs1 << shamt)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b010 => {
@@ -739,7 +762,7 @@ impl Emulator {
                                     self.set_reg(dec.rd, 0)?;
                                 }
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b011 => {
@@ -752,7 +775,7 @@ impl Emulator {
                                     self.set_reg(dec.rd, 0)?;
                                 }
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b100 => {
@@ -761,7 +784,7 @@ impl Emulator {
                                 // XOR
                                 self.set_reg(dec.rd, rs1 ^ rs2)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b101 => {
@@ -777,7 +800,7 @@ impl Emulator {
                                 let value = ((rs1 as i64) >> shamt) as u64;
                                 self.set_reg(dec.rd, value)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b110 => {
@@ -786,7 +809,7 @@ impl Emulator {
                                 // OR
                                 self.set_reg(dec.rd, rs1 | rs2)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b111 => {
@@ -795,15 +818,15 @@ impl Emulator {
                                 // AND
                                 self.set_reg(dec.rd, rs1 & rs2)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
-                    _ => return Err(Error::InvalidInstruction),
+                    _ => return Err(VmExit::InvalidInstruction),
                 }
             }
             0b0001111 => {
                 // FENCE
-                return Err(Error::UnimplementedInstruction);
+                return Err(VmExit::UnimplementedInstruction);
             }
             0b1110011 => {
                 let dec = Itype::from(inst);
@@ -811,15 +834,15 @@ impl Emulator {
                 if dec.rd == Reg(0) && dec.funct3 == 0 && dec.rs1 == Reg(0) {
                     if dec.imm == 0 {
                         // ECALL
-                        return Err(Error::ECall);
+                        return Err(VmExit::ECall);
                     } else if dec.imm == 1 {
                         // EBREAK
-                        return Err(Error::EBreak);
+                        return Err(VmExit::EBreak);
                     } else {
-                        return Err(Error::InvalidInstruction);
+                        return Err(VmExit::InvalidInstruction);
                     }
                 } else {
-                    return Err(Error::InvalidInstruction);
+                    return Err(VmExit::InvalidInstruction);
                 }
             }
             0b0011011 => {
@@ -842,7 +865,7 @@ impl Emulator {
                                 let value = (rs1 << shamt) as i32 as u64;
                                 self.set_reg(dec.rd, value)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b101 => {
@@ -860,10 +883,10 @@ impl Emulator {
                                     ((rs1 as i32) >> shamt) as i32 as u64;
                                 self.set_reg(dec.rd, value)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
-                    _ => return Err(Error::InvalidInstruction),
+                    _ => return Err(VmExit::InvalidInstruction),
                 }
             }
             0b0111011 => {
@@ -887,7 +910,7 @@ impl Emulator {
                                     rs1.wrapping_sub(rs2) as i32 as u64;
                                 self.set_reg(dec.rd, value)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b001 => {
@@ -898,7 +921,7 @@ impl Emulator {
                                 let value = (rs1 << shamt) as i32 as u64;
                                 self.set_reg(dec.rd, value)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
                     0b101 => {
@@ -915,16 +938,16 @@ impl Emulator {
                                 let value = ((rs1 as i32) >> shamt) as u64;
                                 self.set_reg(dec.rd, value)?;
                             }
-                            _ => return Err(Error::InvalidInstruction),
+                            _ => return Err(VmExit::InvalidInstruction),
                         }
                     }
-                    _ => return Err(Error::InvalidInstruction),
+                    _ => return Err(VmExit::InvalidInstruction),
                 }
             }
-            _ => return Err(Error::InvalidInstruction),
+            _ => return Err(VmExit::InvalidInstruction),
         }
 
-        self.set_reg(RegName::Pc, pc.wrapping_add(4))?;
+        self.set_reg(RegAlias::Pc, pc.wrapping_add(4))?;
 
         Ok(())
     }

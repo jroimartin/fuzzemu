@@ -284,21 +284,23 @@ impl Mmu {
         Ok(())
     }
 
-    /// Returns a slice with the data stored in the specified memory range.
+    /// Copy the data starting in the specified memory address into `dst`.
     /// This function will fail if the source memory is not readable.
-    pub fn read(&self, addr: VirtAddr, size: usize) -> Result<&[u8], Error> {
-        self.read_with_perms(addr, size, Perm(PERM_READ))
+    pub fn read(&self, addr: VirtAddr, dst: &mut [u8]) -> Result<(), Error> {
+        self.read_with_perms(addr, dst, Perm(PERM_READ))
     }
 
-    /// Returns a slice with the data stored in the specified memory range.
+    /// Copy the data starting in the specified memory address into `dst`.
     /// This function will fail if the source memory does not satisfy the
     /// expected permissions.
     pub fn read_with_perms(
         &self,
         addr: VirtAddr,
-        size: usize,
+        dst: &mut [u8],
         perms: Perm,
-    ) -> Result<&[u8], Error> {
+    ) -> Result<(), Error> {
+        let size = dst.len();
+
         // Check if the source memory range is readable.
         self.check_perms(addr, size, perms)?;
 
@@ -306,9 +308,13 @@ impl Mmu {
             .checked_add(size)
             .ok_or(Error::AddressIntegerOverflow { addr, size })?;
 
-        self.memory
+        let src = self.memory
             .get(*addr..end)
-            .ok_or(Error::InvalidAddress { addr, size })
+            .ok_or(Error::InvalidAddress { addr, size })?;
+
+        dst.copy_from_slice(src);
+
+        Ok(())
     }
 
     /// Copy the bytes in `src` to the given memory address. This function
@@ -327,16 +333,22 @@ impl Mmu {
         Ok(())
     }
 
-    /// Returns a slice with the data stored in the specified memory range.
+    /// Copy the data starting in the specified memory address into `dst`.
     /// This function does not check memory permissions.
-    pub fn peek(&self, addr: VirtAddr, size: usize) -> Result<&[u8], Error> {
+    pub fn peek(&self, addr: VirtAddr, dst: &mut [u8]) -> Result<(), Error> {
+        let size = dst.len();
+
         let end = addr
             .checked_add(size)
             .ok_or(Error::AddressIntegerOverflow { addr, size })?;
 
-        self.memory
+        let src = self.memory
             .get(*addr..end)
-            .ok_or(Error::InvalidAddress { addr, size })
+            .ok_or(Error::InvalidAddress { addr, size })?;
+
+        dst.copy_from_slice(src);
+
+        Ok(())
     }
 
     /// Compute dirty blocks and bitmap. It does not check if the memory range
@@ -428,20 +440,25 @@ mod tests {
     fn mmu_poke_peek() {
         let mut mmu = Mmu::new(4);
         mmu.poke(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
-        let got = mmu.peek(VirtAddr(0), 4).unwrap();
 
-        assert_eq!(got, &[1, 2, 3, 4]);
+        let mut got = [0u8; 4];
+        mmu.peek(VirtAddr(0), &mut got).unwrap();
+
+        assert_eq!(&got, &[1, 2, 3, 4]);
     }
 
     #[test]
     fn mmu_write_read() {
         let mut mmu = Mmu::new(4);
+
         mmu.set_perms(VirtAddr(0), 4, Perm(PERM_READ | PERM_WRITE))
             .unwrap();
         mmu.write(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
-        let got = mmu.read(VirtAddr(0), 4).unwrap();
 
-        assert_eq!(got, &[1, 2, 3, 4]);
+        let mut got = [0u8; 4];
+        mmu.read(VirtAddr(0), &mut got).unwrap();
+
+        assert_eq!(&got, &[1, 2, 3, 4]);
     }
 
     #[test]
@@ -457,7 +474,9 @@ mod tests {
     #[test]
     fn mmu_read_not_allowed() {
         let mmu = Mmu::new(4);
-        match mmu.read(VirtAddr(0), 2) {
+
+        let mut tmp = [0u8; 2];
+        match mmu.read(VirtAddr(0), &mut tmp) {
             Err(Error::NotAllowed { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
@@ -471,9 +490,9 @@ mod tests {
             .unwrap();
         mmu.write(VirtAddr(0), &[1, 2]).unwrap();
 
-        assert_eq!(&mmu.memory[..4], &[1, 2, 0, 0]);
+        assert_eq!(mmu.memory, &[1, 2, 0, 0]);
         assert_eq!(
-            &mmu.perms[..4],
+            &mmu.perms,
             &[
                 Perm(PERM_WRITE | PERM_READ),
                 Perm(PERM_WRITE | PERM_READ),
@@ -491,9 +510,11 @@ mod tests {
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
         mmu.write(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
-        let got = mmu.read(VirtAddr(0), 4).unwrap();
 
-        assert_eq!(got, &[1, 2, 3, 4]);
+        let mut got = [0u8; 4];
+        mmu.read(VirtAddr(0), &mut got).unwrap();
+
+        assert_eq!(&got, &[1, 2, 3, 4]);
     }
 
     #[test]
@@ -502,7 +523,9 @@ mod tests {
         mmu.set_perms(VirtAddr(0), 2, Perm(PERM_READ)).unwrap();
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
-        match mmu.read(VirtAddr(1), 2) {
+
+        let mut tmp = [0u8; 2];
+        match mmu.read(VirtAddr(1), &mut tmp) {
             Err(Error::UnitializedMemory { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
@@ -515,7 +538,9 @@ mod tests {
         mmu.set_perms(VirtAddr(0), 2, Perm(PERM_WRITE)).unwrap();
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
-        match mmu.read(VirtAddr(1), 2) {
+
+        let mut tmp = [0u8; 2];
+        match mmu.read(VirtAddr(1), &mut tmp) {
             Err(Error::NotAllowed { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
@@ -532,13 +557,15 @@ mod tests {
             .unwrap();
         mmu_fork.write(VirtAddr(1028), &[1, 2, 3, 4]).unwrap();
 
-        let got = mmu_fork.peek(VirtAddr(1028), 4).unwrap();
-        assert_eq!(got, &[1, 2, 3, 4]);
+        let mut got = [0u8; 4];
+
+        mmu_fork.peek(VirtAddr(1028), &mut got).unwrap();
+        assert_eq!(&got, &[1, 2, 3, 4]);
 
         mmu_fork.reset(&mmu);
 
-        let got = mmu_fork.peek(VirtAddr(1028), 4).unwrap();
-        assert_eq!(got, &[0, 0, 0, 0]);
+        mmu_fork.peek(VirtAddr(1028), &mut got).unwrap();
+        assert_eq!(&got, &[0, 0, 0, 0]);
     }
 
     #[test]
@@ -551,13 +578,15 @@ mod tests {
             .unwrap();
         mmu_fork.write(VirtAddr(1022), &[1, 2, 3, 4]).unwrap();
 
-        let got = mmu_fork.peek(VirtAddr(1022), 4).unwrap();
-        assert_eq!(got, &[1, 2, 3, 4]);
+        let mut got = [0u8; 4];
+
+        mmu_fork.peek(VirtAddr(1022), &mut got).unwrap();
+        assert_eq!(&got, &[1, 2, 3, 4]);
 
         mmu_fork.reset(&mmu);
 
-        let got = mmu_fork.peek(VirtAddr(1022), 4).unwrap();
-        assert_eq!(got, &[0, 0, 0, 0]);
+        mmu_fork.peek(VirtAddr(1022), &mut got).unwrap();
+        assert_eq!(&got, &[0, 0, 0, 0]);
     }
 
     #[test]
@@ -570,13 +599,15 @@ mod tests {
             .set_perms(VirtAddr(1024), 2, Perm(PERM_WRITE))
             .unwrap();
 
-        let got = mmu_fork.peek(VirtAddr(1022), 4).unwrap();
-        assert_eq!(got, &[1, 2, 3, 4]);
+        let mut got = [0u8; 4];
+
+        mmu_fork.peek(VirtAddr(1022), &mut got).unwrap();
+        assert_eq!(&got, &[1, 2, 3, 4]);
 
         mmu_fork.reset(&mmu);
 
-        let got = mmu_fork.peek(VirtAddr(1022), 4).unwrap();
-        assert_eq!(got, &[1, 2, 0, 0]);
+        mmu_fork.peek(VirtAddr(1022), &mut got).unwrap();
+        assert_eq!(&got, &[1, 2, 0, 0]);
     }
 
     #[test]
@@ -588,11 +619,15 @@ mod tests {
             .set_perms(VirtAddr(0), 1024 * 1024, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
         mmu_fork.write(VirtAddr(1028), &[1, 2, 3, 4]).unwrap();
-        let got = mmu_fork.read(VirtAddr(1028), 4).unwrap();
-        assert_eq!(got, &[1, 2, 3, 4]);
+
+        let mut got = [0u8; 4];
+
+        mmu_fork.read(VirtAddr(1028), &mut got).unwrap();
+        assert_eq!(&got, &[1, 2, 3, 4]);
 
         mmu_fork.reset(&mmu);
-        let got = mmu_fork.peek(VirtAddr(4), 4).unwrap();
-        assert_eq!(got, &[0, 0, 0, 0]);
+
+        mmu_fork.peek(VirtAddr(4), &mut got).unwrap();
+        assert_eq!(&got, &[0, 0, 0, 0]);
     }
 }
