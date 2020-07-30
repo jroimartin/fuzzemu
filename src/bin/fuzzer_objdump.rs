@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use riscv_emu::emulator::Emulator;
+use riscv_emu::emulator::{Emulator, RegName};
+use riscv_emu::mmu::{Perm, VirtAddr, PERM_EXEC, PERM_READ, PERM_WRITE};
 
 const NCORES: usize = 1;
 
@@ -44,6 +45,17 @@ fn main() {
             eprintln!("error: could not create emulator: {}", err);
             process::exit(1);
         });
+    emu_init
+        .mmu
+        .set_perms(
+            VirtAddr(0),
+            32 * 1024 * 1024,
+            Perm(PERM_EXEC | PERM_READ | PERM_WRITE),
+        )
+        .unwrap();
+    emu_init
+        .set_reg(RegName::Sp, 32 * 1024 * 1024 - 64)
+        .unwrap();
     let emu_init = Arc::new(emu_init);
 
     let stats = Arc::new(Mutex::new(Stats::default()));

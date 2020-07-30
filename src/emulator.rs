@@ -16,6 +16,7 @@ pub enum Error {
     AddressMisaligned,
     InvalidInstruction,
     InvalidRegister,
+    InvalidMemorySegment,
     UnimplementedInstruction,
     EBreak,
     ECall,
@@ -34,6 +35,7 @@ impl fmt::Display for Error {
             }
             Error::InvalidInstruction => write!(f, "invalid instruction"),
             Error::InvalidRegister => write!(f, "invalid register"),
+            Error::InvalidMemorySegment => write!(f, "invalid memory segment"),
             Error::UnimplementedInstruction => {
                 write!(f, "unimplemented instruction")
             }
@@ -289,8 +291,11 @@ impl From<u32> for Jtype {
 /// RISC-V emulator. This implementation only supports the RV64i Base Integer
 /// Instruction Set and assumes little-endian.
 pub struct Emulator {
+    /// State of the registers.
     regs: [u64; 33],
-    mmu: Mmu,
+
+    /// MMU used by the emulator for memory operations.
+    pub mmu: Mmu,
 }
 
 impl fmt::Display for Emulator {
@@ -334,18 +339,23 @@ impl Emulator {
         let elf = Elf::parse(&contents)?;
 
         for phdr in elf.phdrs() {
-            let segment_bytes = contents
-                .get(phdr.offset()..phdr.offset() + phdr.file_size())
-                .ok_or(elf::Error::MalformedFile)?;
+            let file_offset = phdr.offset();
+            let file_end = file_offset
+                .checked_add(phdr.file_size())
+                .ok_or(Error::InvalidMemorySegment)?;
 
-            self.mmu.poke(phdr.virt_addr(), segment_bytes)?;
-            self.mmu.set_perms(
-                phdr.virt_addr(),
-                phdr.mem_size(),
-                phdr.perms(),
-            )?;
+            let file_bytes = contents
+                .get(file_offset..file_end)
+                .ok_or(Error::InvalidMemorySegment)?;
+
+            let mem_start = phdr.virt_addr();
+            let mem_size = phdr.mem_size();
+
+            self.mmu.poke(mem_start, file_bytes)?;
+            self.mmu.set_perms(mem_start, mem_size, phdr.perms())?;
         }
 
+        // Place the program counter in the entrypoint.
         self.set_reg(RegName::Pc, *elf.entry() as u64)?;
 
         Ok(())
@@ -377,7 +387,7 @@ impl Emulator {
             return Err(Error::InvalidRegister);
         }
 
-        // zero register is always 0.
+        // The zero register is always 0.
         if reg != 0 {
             self.regs[reg] = val;
         }
@@ -392,7 +402,7 @@ impl Emulator {
             return Err(Error::InvalidRegister);
         }
 
-        // zero register is always 0.
+        // The zero register is always 0.
         if reg == 0 {
             Ok(0)
         } else {
@@ -660,25 +670,26 @@ impl Emulator {
                         self.set_reg(dec.rd, rs1 & imm)?;
                     }
                     0b001 => {
-                        match dec.imm as u32 >> 5 {
-                            0b0000000 => {
+                        println!("{:012b}", dec.imm);
+                        match dec.imm as u32 >> 6 {
+                            0b000000 => {
                                 // SLLI
-                                let shamt = dec.imm & 0b1_1111;
+                                let shamt = dec.imm & 0b11_1111;
                                 self.set_reg(dec.rd, rs1 << shamt)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
                     }
                     0b101 => {
-                        match dec.imm as u32 >> 5 {
-                            0b0000000 => {
+                        match dec.imm as u32 >> 6 {
+                            0b000000 => {
                                 // SRLI
-                                let shamt = dec.imm & 0b1_1111;
+                                let shamt = dec.imm & 0b11_1111;
                                 self.set_reg(dec.rd, rs1 >> shamt)?;
                             }
-                            0b0100000 => {
+                            0b010000 => {
                                 // SRAI
-                                let shamt = dec.imm & 0b1_1111;
+                                let shamt = dec.imm & 0b1_11111;
                                 let value = ((rs1 as i64) >> shamt) as u64;
                                 self.set_reg(dec.rd, value)?;
                             }
@@ -824,10 +835,10 @@ impl Emulator {
                         self.set_reg(dec.rd, value)?;
                     }
                     0b001 => {
-                        match dec.imm as u32 >> 5 {
-                            0b0000000 => {
+                        match dec.imm as u32 >> 6 {
+                            0b000000 => {
                                 // SLLIW
-                                let shamt = dec.imm & 0b1_1111;
+                                let shamt = dec.imm & 0b11_1111;
                                 let value = (rs1 << shamt) as i32 as u64;
                                 self.set_reg(dec.rd, value)?;
                             }
@@ -835,16 +846,16 @@ impl Emulator {
                         }
                     }
                     0b101 => {
-                        match dec.imm as u32 >> 5 {
-                            0b0000000 => {
+                        match dec.imm as u32 >> 6 {
+                            0b000000 => {
                                 // SRLIW
-                                let shamt = dec.imm & 0b1_1111;
+                                let shamt = dec.imm & 0b11_1111;
                                 let value = (rs1 >> shamt) as i32 as u64;
                                 self.set_reg(dec.rd, value)?;
                             }
-                            0b0100000 => {
+                            0b010000 => {
                                 // SRAIW
-                                let shamt = dec.imm & 0b1_1111;
+                                let shamt = dec.imm & 0b11_1111;
                                 let value =
                                     ((rs1 as i32) >> shamt) as i32 as u64;
                                 self.set_reg(dec.rd, value)?;
