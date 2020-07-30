@@ -77,24 +77,24 @@ pub struct Perm(pub u8);
 
 impl fmt::Display for Perm {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut disp = String::from("");
+        let mut disp = String::new();
 
         if self.0 & PERM_READ != 0 {
-            disp.push_str("R");
+            disp.push('R');
         } else {
-            disp.push_str("-");
+            disp.push('-');
         }
 
         if self.0 & PERM_WRITE != 0 {
-            disp.push_str("W");
+            disp.push('W');
         } else {
-            disp.push_str("-");
+            disp.push('-');
         }
 
         if self.0 & PERM_EXEC != 0 {
-            disp.push_str("X");
+            disp.push('X');
         } else {
-            disp.push_str("-");
+            disp.push('-');
         }
 
         write!(f, "{}", disp)

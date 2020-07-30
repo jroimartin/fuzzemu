@@ -15,6 +15,7 @@ use crate::mmu::{self, Mmu, Perm, VirtAddr, PERM_EXEC};
 pub enum Error {
     AddressMisaligned,
     InvalidInstruction,
+    InvalidRegister,
     UnimplementedInstruction,
     EBreak,
     ECall,
@@ -32,6 +33,7 @@ impl fmt::Display for Error {
                 write!(f, "address-missaligned exception")
             }
             Error::InvalidInstruction => write!(f, "invalid instruction"),
+            Error::InvalidRegister => write!(f, "invalid register"),
             Error::UnimplementedInstruction => {
                 write!(f, "unimplemented instruction")
             }
@@ -291,6 +293,28 @@ pub struct Emulator {
     mmu: Mmu,
 }
 
+impl fmt::Display for Emulator {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        const REG_STR: [&str; 33] = [
+            "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1",
+            "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4",
+            "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5",
+            "t6", "pc",
+        ];
+
+        let mut disp = String::new();
+        disp.push_str("Registers:\n");
+        for (i, reg_val) in self.regs.iter().enumerate() {
+            let line = format!("  {:>4}: {:#010x} ", REG_STR[i], reg_val);
+            disp.push_str(&line);
+            if (i + 1) % 4 == 0 {
+                disp.push('\n');
+            }
+        }
+        write!(f, "{}", disp)
+    }
+}
+
 impl Emulator {
     /// Returns a new emulator with a memory of size `mem_size`.
     pub fn new(mem_size: usize) -> Emulator {
@@ -322,7 +346,7 @@ impl Emulator {
             )?;
         }
 
-        self.set_reg(RegName::Pc, *elf.entry() as u64);
+        self.set_reg(RegName::Pc, *elf.entry() as u64)?;
 
         Ok(())
     }
@@ -330,7 +354,7 @@ impl Emulator {
     /// Returns a copy of the Emulator, including its internal state.
     pub fn fork(&self) -> Emulator {
         Emulator {
-            regs: self.regs.clone(),
+            regs: self.regs,
             mmu: self.mmu.fork(),
         }
     }
@@ -342,35 +366,44 @@ impl Emulator {
     }
 
     /// Sets the value of the register `reg` to `val`.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if the register index is greater than 32.
-    pub fn set_reg<T: Into<Reg>>(&mut self, reg: T, val: u64) {
+    pub fn set_reg<T: Into<Reg>>(
+        &mut self,
+        reg: T,
+        val: u64,
+    ) -> Result<(), Error> {
         let reg = *reg.into() as usize;
 
-        assert!(reg < 33, "invalid register");
+        if reg >= self.regs.len() {
+            return Err(Error::InvalidRegister);
+        }
 
-        self.regs[reg] = val;
+        // zero register is always 0.
+        if reg != 0 {
+            self.regs[reg] = val;
+        }
+        Ok(())
     }
 
     /// Returns the value stored in the register `reg`.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if the register index is greater than 32.
-    pub fn get_reg<T: Into<Reg>>(&self, reg: T) -> u64 {
+    pub fn get_reg<T: Into<Reg>>(&self, reg: T) -> Result<u64, Error> {
         let reg = *reg.into() as usize;
 
-        assert!(reg < 33, "invalid register");
+        if reg >= self.regs.len() {
+            return Err(Error::InvalidRegister);
+        }
 
-        self.regs[reg]
+        // zero register is always 0.
+        if reg == 0 {
+            Ok(0)
+        } else {
+            Ok(self.regs[reg])
+        }
     }
 
     /// Emulates until vm exit or error.
     pub fn run(&mut self) -> Result<(), Error> {
         loop {
-            let pc = self.get_reg(RegName::Pc);
+            let pc = self.get_reg(RegName::Pc)?;
             let bytes = self.mmu.read_with_perms(
                 VirtAddr(pc as usize),
                 4,
@@ -387,26 +420,28 @@ impl Emulator {
     fn run_instruction(&mut self, inst: u32) -> Result<(), Error> {
         let opcode = inst & 0b111_1111;
 
-        let pc = self.get_reg(RegName::Pc);
+        let pc = self.get_reg(RegName::Pc)?;
 
         if pc & 3 != 0 {
             return Err(Error::AddressMisaligned);
         }
 
-        println!("{:#x} {:07b}", pc, opcode);
+        eprintln!("---");
+        eprintln!("{}", self);
+        eprintln!("{:#010x}: {:08x} {:07b}", pc, inst, opcode);
 
         match opcode {
             0b0110111 => {
                 // LUI
                 let dec = Utype::from(inst);
 
-                self.set_reg(dec.rd, dec.imm as u64);
+                self.set_reg(dec.rd, dec.imm as u64)?;
             }
             0b0010111 => {
                 // AUIPIC
                 let dec = Utype::from(inst);
 
-                self.set_reg(dec.rd, pc.wrapping_add(dec.imm as u64));
+                self.set_reg(dec.rd, pc.wrapping_add(dec.imm as u64))?;
             }
             0b1101111 => {
                 // JAL
@@ -414,24 +449,24 @@ impl Emulator {
 
                 let offset = dec.imm as u64;
 
-                self.set_reg(dec.rd, pc.wrapping_add(4));
-                self.set_reg(RegName::Pc, pc.wrapping_add(offset));
+                self.set_reg(dec.rd, pc.wrapping_add(4))?;
+                self.set_reg(RegName::Pc, pc.wrapping_add(offset))?;
                 return Ok(());
             }
             0b1100111 => {
                 let dec = Itype::from(inst);
 
                 let offset = dec.imm as u64;
-                let rs1 = self.get_reg(dec.rs1);
+                let rs1 = self.get_reg(dec.rs1)?;
 
                 match dec.funct3 {
                     0b000 => {
                         // JALR
-                        self.set_reg(dec.rd, pc.wrapping_add(4));
+                        self.set_reg(dec.rd, pc.wrapping_add(4))?;
                         self.set_reg(
                             RegName::Pc,
-                            (rs1.wrapping_add(offset)) & 0,
-                        );
+                            rs1.wrapping_add(offset) >> 1 << 1,
+                        )?;
                         return Ok(());
                     }
                     _ => return Err(Error::UnimplementedInstruction),
@@ -441,49 +476,67 @@ impl Emulator {
                 let dec = Btype::from(inst);
 
                 let offset = dec.imm as u64;
-                let rs1 = self.get_reg(dec.rs1);
-                let rs2 = self.get_reg(dec.rs2);
+                let rs1 = self.get_reg(dec.rs1)?;
+                let rs2 = self.get_reg(dec.rs2)?;
 
                 match dec.funct3 {
                     0b000 => {
                         // BEQ
                         if rs1 == rs2 {
-                            self.set_reg(RegName::Pc, pc.wrapping_add(offset));
+                            self.set_reg(
+                                RegName::Pc,
+                                pc.wrapping_add(offset),
+                            )?;
                             return Ok(());
                         }
                     }
                     0b001 => {
                         // BNE
                         if rs1 != rs2 {
-                            self.set_reg(RegName::Pc, pc.wrapping_add(offset));
+                            self.set_reg(
+                                RegName::Pc,
+                                pc.wrapping_add(offset),
+                            )?;
                             return Ok(());
                         }
                     }
                     0b100 => {
                         // BLT
                         if (rs1 as i64) < (rs2 as i64) {
-                            self.set_reg(RegName::Pc, pc.wrapping_add(offset));
+                            self.set_reg(
+                                RegName::Pc,
+                                pc.wrapping_add(offset),
+                            )?;
                             return Ok(());
                         }
                     }
                     0b101 => {
                         // BGE
                         if (rs1 as i64) >= (rs2 as i64) {
-                            self.set_reg(RegName::Pc, pc.wrapping_add(offset));
+                            self.set_reg(
+                                RegName::Pc,
+                                pc.wrapping_add(offset),
+                            )?;
                             return Ok(());
                         }
                     }
                     0b110 => {
                         // BLTU
                         if rs1 < rs2 {
-                            self.set_reg(RegName::Pc, pc.wrapping_add(offset));
+                            self.set_reg(
+                                RegName::Pc,
+                                pc.wrapping_add(offset),
+                            )?;
                             return Ok(());
                         }
                     }
                     0b111 => {
                         // BGEU
                         if rs1 >= rs2 {
-                            self.set_reg(RegName::Pc, pc.wrapping_add(offset));
+                            self.set_reg(
+                                RegName::Pc,
+                                pc.wrapping_add(offset),
+                            )?;
                             return Ok(());
                         }
                     }
@@ -493,7 +546,7 @@ impl Emulator {
             0b0000011 => {
                 let dec = Itype::from(inst);
 
-                let rs1 = self.get_reg(dec.rs1);
+                let rs1 = self.get_reg(dec.rs1)?;
                 let offset = dec.imm as u64;
                 let vaddr = rs1.wrapping_add(offset);
 
@@ -504,31 +557,31 @@ impl Emulator {
                 match dec.funct3 {
                     0b000 => {
                         // LB
-                        self.set_reg(dec.rd, value as i8 as u64);
+                        self.set_reg(dec.rd, value as i8 as u64)?;
                     }
                     0b001 => {
                         // LH
-                        self.set_reg(dec.rd, value as i16 as u64);
+                        self.set_reg(dec.rd, value as i16 as u64)?;
                     }
                     0b010 => {
                         // LW
-                        self.set_reg(dec.rd, value as i32 as u64);
+                        self.set_reg(dec.rd, value as i32 as u64)?;
                     }
                     0b100 => {
                         // LBU
-                        self.set_reg(dec.rd, value as u8 as u64);
+                        self.set_reg(dec.rd, value as u8 as u64)?;
                     }
                     0b101 => {
                         // LHU
-                        self.set_reg(dec.rd, value as u16 as u64);
+                        self.set_reg(dec.rd, value as u16 as u64)?;
                     }
                     0b110 => {
                         // LWU
-                        self.set_reg(dec.rd, value as u32 as u64);
+                        self.set_reg(dec.rd, value as u32 as u64)?;
                     }
                     0b011 => {
                         // LD
-                        self.set_reg(dec.rd, value);
+                        self.set_reg(dec.rd, value)?;
                     }
                     _ => return Err(Error::InvalidInstruction),
                 }
@@ -536,8 +589,8 @@ impl Emulator {
             0b0100011 => {
                 let dec = Stype::from(inst);
 
-                let rs1 = self.get_reg(dec.rs1);
-                let rs2 = self.get_reg(dec.rs2);
+                let rs1 = self.get_reg(dec.rs1)?;
+                let rs2 = self.get_reg(dec.rs2)?;
                 let offset = dec.imm as u64;
                 let vaddr = rs1.wrapping_add(offset);
 
@@ -571,47 +624,47 @@ impl Emulator {
                 let dec = Itype::from(inst);
 
                 let imm = dec.imm as u64;
-                let rs1 = self.get_reg(dec.rs1);
+                let rs1 = self.get_reg(dec.rs1)?;
 
                 match dec.funct3 {
                     0b000 => {
                         // ADDI
-                        self.set_reg(dec.rd, rs1.wrapping_add(imm));
+                        self.set_reg(dec.rd, rs1.wrapping_add(imm))?;
                     }
                     0b010 => {
                         // SLTI
                         if (rs1 as i64) < (imm as i64) {
-                            self.set_reg(dec.rd, 1);
+                            self.set_reg(dec.rd, 1)?;
                         } else {
-                            self.set_reg(dec.rd, 0);
+                            self.set_reg(dec.rd, 0)?;
                         }
                     }
                     0b011 => {
                         // SLTIU
                         if rs1 < imm {
-                            self.set_reg(dec.rd, 1);
+                            self.set_reg(dec.rd, 1)?;
                         } else {
-                            self.set_reg(dec.rd, 0);
+                            self.set_reg(dec.rd, 0)?;
                         }
                     }
                     0b100 => {
                         // XORI
-                        self.set_reg(dec.rd, rs1 ^ imm);
+                        self.set_reg(dec.rd, rs1 ^ imm)?;
                     }
                     0b110 => {
                         // ORI
-                        self.set_reg(dec.rd, rs1 | imm);
+                        self.set_reg(dec.rd, rs1 | imm)?;
                     }
                     0b111 => {
                         // ANDI
-                        self.set_reg(dec.rd, rs1 & imm);
+                        self.set_reg(dec.rd, rs1 & imm)?;
                     }
                     0b001 => {
                         match dec.imm as u32 >> 5 {
                             0b0000000 => {
                                 // SLLI
                                 let shamt = dec.imm & 0b1_1111;
-                                self.set_reg(dec.rd, rs1 << shamt);
+                                self.set_reg(dec.rd, rs1 << shamt)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -621,13 +674,13 @@ impl Emulator {
                             0b0000000 => {
                                 // SRLI
                                 let shamt = dec.imm & 0b1_1111;
-                                self.set_reg(dec.rd, rs1 >> shamt);
+                                self.set_reg(dec.rd, rs1 >> shamt)?;
                             }
                             0b0100000 => {
                                 // SRAI
                                 let shamt = dec.imm & 0b1_1111;
                                 let value = ((rs1 as i64) >> shamt) as u64;
-                                self.set_reg(dec.rd, value);
+                                self.set_reg(dec.rd, value)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -638,19 +691,19 @@ impl Emulator {
             0b0110011 => {
                 let dec = Rtype::from(inst);
 
-                let rs1 = self.get_reg(dec.rs1);
-                let rs2 = self.get_reg(dec.rs2);
+                let rs1 = self.get_reg(dec.rs1)?;
+                let rs2 = self.get_reg(dec.rs2)?;
 
                 match dec.funct3 {
                     0b000 => {
                         match dec.funct7 {
                             0b0000000 => {
                                 // ADD
-                                self.set_reg(dec.rd, rs1.wrapping_add(rs2));
+                                self.set_reg(dec.rd, rs1.wrapping_add(rs2))?;
                             }
                             0b0100000 => {
                                 // SUB
-                                self.set_reg(dec.rd, rs1.wrapping_sub(rs2));
+                                self.set_reg(dec.rd, rs1.wrapping_sub(rs2))?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -660,7 +713,7 @@ impl Emulator {
                             0b0000000 => {
                                 // SLL
                                 let shamt = rs2 & 0b1_1111;
-                                self.set_reg(dec.rd, rs1 << shamt);
+                                self.set_reg(dec.rd, rs1 << shamt)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -670,9 +723,9 @@ impl Emulator {
                             0b0000000 => {
                                 // SLT
                                 if (rs1 as i64) < (rs2 as i64) {
-                                    self.set_reg(dec.rd, 1);
+                                    self.set_reg(dec.rd, 1)?;
                                 } else {
-                                    self.set_reg(dec.rd, 0);
+                                    self.set_reg(dec.rd, 0)?;
                                 }
                             }
                             _ => return Err(Error::InvalidInstruction),
@@ -683,9 +736,9 @@ impl Emulator {
                             0b0000000 => {
                                 // SLTU
                                 if rs1 < rs2 {
-                                    self.set_reg(dec.rd, 1);
+                                    self.set_reg(dec.rd, 1)?;
                                 } else {
-                                    self.set_reg(dec.rd, 0);
+                                    self.set_reg(dec.rd, 0)?;
                                 }
                             }
                             _ => return Err(Error::InvalidInstruction),
@@ -695,7 +748,7 @@ impl Emulator {
                         match dec.funct7 {
                             0b0000000 => {
                                 // XOR
-                                self.set_reg(dec.rd, rs1 ^ rs2);
+                                self.set_reg(dec.rd, rs1 ^ rs2)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -705,13 +758,13 @@ impl Emulator {
                             0b0000000 => {
                                 // SRL
                                 let shamt = rs2 & 0b1_1111;
-                                self.set_reg(dec.rd, rs1 >> shamt);
+                                self.set_reg(dec.rd, rs1 >> shamt)?;
                             }
                             0b0100000 => {
                                 // SRA
                                 let shamt = rs2 & 0b1_1111;
                                 let value = ((rs1 as i64) >> shamt) as u64;
-                                self.set_reg(dec.rd, value);
+                                self.set_reg(dec.rd, value)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -720,7 +773,7 @@ impl Emulator {
                         match dec.funct7 {
                             0b0000000 => {
                                 // OR
-                                self.set_reg(dec.rd, rs1 | rs2);
+                                self.set_reg(dec.rd, rs1 | rs2)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -729,7 +782,7 @@ impl Emulator {
                         match dec.funct7 {
                             0b0000000 => {
                                 // AND
-                                self.set_reg(dec.rd, rs1 & rs2);
+                                self.set_reg(dec.rd, rs1 & rs2)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -762,13 +815,13 @@ impl Emulator {
                 let dec = Itype::from(inst);
 
                 let imm = dec.imm as u32;
-                let rs1 = self.get_reg(dec.rs1) as u32;
+                let rs1 = self.get_reg(dec.rs1)? as u32;
 
                 match dec.funct3 {
                     0b000 => {
                         // ADDIW
                         let value = rs1.wrapping_add(imm) as i32 as u64;
-                        self.set_reg(dec.rd, value);
+                        self.set_reg(dec.rd, value)?;
                     }
                     0b001 => {
                         match dec.imm as u32 >> 5 {
@@ -776,7 +829,7 @@ impl Emulator {
                                 // SLLIW
                                 let shamt = dec.imm & 0b1_1111;
                                 let value = (rs1 << shamt) as i32 as u64;
-                                self.set_reg(dec.rd, value);
+                                self.set_reg(dec.rd, value)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -787,14 +840,14 @@ impl Emulator {
                                 // SRLIW
                                 let shamt = dec.imm & 0b1_1111;
                                 let value = (rs1 >> shamt) as i32 as u64;
-                                self.set_reg(dec.rd, value);
+                                self.set_reg(dec.rd, value)?;
                             }
                             0b0100000 => {
                                 // SRAIW
                                 let shamt = dec.imm & 0b1_1111;
                                 let value =
                                     ((rs1 as i32) >> shamt) as i32 as u64;
-                                self.set_reg(dec.rd, value);
+                                self.set_reg(dec.rd, value)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -805,8 +858,8 @@ impl Emulator {
             0b0111011 => {
                 let dec = Rtype::from(inst);
 
-                let rs1 = self.get_reg(dec.rs1) as u32;
-                let rs2 = self.get_reg(dec.rs2) as u32;
+                let rs1 = self.get_reg(dec.rs1)? as u32;
+                let rs2 = self.get_reg(dec.rs2)? as u32;
 
                 match dec.funct3 {
                     0b000 => {
@@ -815,13 +868,13 @@ impl Emulator {
                                 //ADDW
                                 let value =
                                     rs1.wrapping_add(rs2) as i32 as u64;
-                                self.set_reg(dec.rd, value);
+                                self.set_reg(dec.rd, value)?;
                             }
                             0b0100000 => {
                                 //SUBW
                                 let value =
                                     rs1.wrapping_sub(rs2) as i32 as u64;
-                                self.set_reg(dec.rd, value);
+                                self.set_reg(dec.rd, value)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -832,7 +885,7 @@ impl Emulator {
                                 //SLLW
                                 let shamt = rs2 & 0b11_1111;
                                 let value = (rs1 << shamt) as i32 as u64;
-                                self.set_reg(dec.rd, value);
+                                self.set_reg(dec.rd, value)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -843,13 +896,13 @@ impl Emulator {
                                 //SRLW
                                 let shamt = rs2 & 0b11_1111;
                                 let value = (rs1 >> shamt) as i32 as u64;
-                                self.set_reg(dec.rd, value);
+                                self.set_reg(dec.rd, value)?;
                             }
                             0b0100000 => {
                                 //SRAW
                                 let shamt = rs2 & 0b11_1111;
                                 let value = ((rs1 as i32) >> shamt) as u64;
-                                self.set_reg(dec.rd, value);
+                                self.set_reg(dec.rd, value)?;
                             }
                             _ => return Err(Error::InvalidInstruction),
                         }
@@ -860,7 +913,7 @@ impl Emulator {
             _ => return Err(Error::InvalidInstruction),
         }
 
-        self.set_reg(RegName::Pc, pc.wrapping_add(4));
+        self.set_reg(RegName::Pc, pc.wrapping_add(4))?;
 
         Ok(())
     }
