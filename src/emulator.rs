@@ -30,6 +30,12 @@ pub enum VmExit {
     MmuError(mmu::Error),
 }
 
+impl VmExit {
+    pub fn is_crash(&self) -> bool {
+        false
+    }
+}
+
 impl fmt::Display for VmExit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -72,7 +78,7 @@ impl From<elf::Error> for VmExit {
     }
 }
 
-/// CPU Registers.
+/// A CPU Register.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Reg(pub u32);
 
@@ -84,12 +90,14 @@ impl Deref for Reg {
     }
 }
 
-/// Alternative name for CPU register. Note that `Reg` implements the trait
-/// `From<RegAlias>`, which simplifies referencing Registers by alias.
+/// Alternative name for CPU registers.
+///
+/// Note that `Reg` implements the trait `From<RegAlias>`, which simplifies
+/// referencing Registers by alias.
 ///
 /// # Examples
 ///
-/// All the following calls to `reg_set` are equivalent:
+/// All the following calls to `get_reg` are equivalent:
 ///
 /// ```
 /// use riscv_emu::emulator::{Emulator, Reg, RegAlias};
@@ -102,7 +110,7 @@ impl Deref for Reg {
 /// emulator.get_reg(Reg(0));
 /// ```
 ///
-/// For obvious reasons, the first options is recommended.
+/// For obvious reasons, the first option is recommended.
 pub enum RegAlias {
     Zero = 0,
     Ra,
@@ -416,8 +424,11 @@ impl Emulator {
         }
     }
 
-    /// Emulates until vm exit or error.
-    pub fn run(&mut self) -> Result<(), VmExit> {
+    /// Emulates until vm exit or error. In returns the number of executed
+    /// instructions in `inst_execed`.
+    pub fn run(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
+        *inst_execed = 0;
+
         loop {
             let pc = self.get_reg(RegAlias::Pc)?;
 
@@ -429,6 +440,8 @@ impl Emulator {
             )?;
 
             let inst = u32::from_le_bytes(bytes);
+
+            *inst_execed += 1;
 
             self.run_instruction(inst)?;
         }
