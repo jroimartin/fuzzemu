@@ -1,7 +1,9 @@
 //! Emulated MMU with byte-level memory permissions able to detect unitialized
 //! memory accesses.
 
+use std::convert::TryInto;
 use std::fmt;
+use std::mem;
 use std::ops::Deref;
 
 /// Executable memory. Aimed to be used with `Perm`.
@@ -24,7 +26,7 @@ pub const PERM_RAW: u8 = 1 << 3;
 /// Block size used for resetting and tracking memory which has been modified.
 /// Memory is considered dirty after writing to it and after changing its
 /// permissions.
-const DIRTY_BLOCK_SIZE: usize = 1024;
+pub const DIRTY_BLOCK_SIZE: usize = 1024;
 
 /// Memory error.
 #[derive(Debug)]
@@ -151,9 +153,9 @@ impl Mmu {
     ///
     /// # Panics
     ///
-    /// This function panics if `size` is 0.
+    /// This function panics if `size` is lower than `DIRTY_BLOCK_SIZE`.
     pub fn new(size: usize) -> Mmu {
-        assert!(size > 0, "invalid size");
+        assert!(size >= DIRTY_BLOCK_SIZE, "invalid size");
 
         Mmu {
             size,
@@ -372,7 +374,103 @@ impl Mmu {
             }
         }
     }
+
+    /// Write an integer value into a given memory address. This function will
+    /// fail if the destination memory is not writable.
+    pub fn write_int<T: LeBytes>(
+        &mut self,
+        addr: VirtAddr,
+        value: T::Target,
+    ) -> Result<(), Error> {
+        let bytes = T::to_le_bytes(value);
+        self.write(addr, &bytes[..mem::size_of::<T::Target>()])?;
+        Ok(())
+    }
+
+    /// Read the data starting at the specified memory address into an integer.
+    /// This function will fail if the source memory is not readable.
+    pub fn read_int<T: LeBytes>(
+        &self,
+        addr: VirtAddr,
+    ) -> Result<T::Target, Error> {
+        let mut bytes = [0u8; 16];
+        self.read(addr, &mut bytes[..mem::size_of::<T::Target>()])?;
+        Ok(T::from_le_bytes(bytes))
+    }
+
+    /// Write an integer value into a given memory address. This function will
+    /// This function does not check memory permissions.
+    pub fn poke_int<T: LeBytes>(
+        &mut self,
+        addr: VirtAddr,
+        value: T::Target,
+    ) -> Result<(), Error> {
+        let bytes = T::to_le_bytes(value);
+        self.poke(addr, &bytes[..mem::size_of::<T::Target>()])?;
+        Ok(())
+    }
+
+    /// Read the data starting at the specified memory address into an integer.
+    /// This function does not check memory permissions.
+    pub fn peek_int<T: LeBytes>(
+        &self,
+        addr: VirtAddr,
+    ) -> Result<T::Target, Error> {
+        let mut bytes = [0u8; 16];
+        self.peek(addr, &mut bytes[..mem::size_of::<T::Target>()])?;
+        Ok(T::from_le_bytes(bytes))
+    }
 }
+
+/// Types implementing this trait can be converted to and from little-endian
+/// bytes.
+pub trait LeBytes {
+    type Target;
+
+    /// Convert an array of bytes into a value of the associated type.
+    fn from_le_bytes(bytes: [u8; 16]) -> Self::Target;
+
+    /// Convert a value of the associated type into an array of bytes.
+    fn to_le_bytes(value: Self::Target) -> [u8; 16];
+}
+
+macro_rules! impl_le_bytes {
+    ($Ty: ty) => {
+        impl LeBytes for $Ty {
+            type Target = $Ty;
+
+            fn from_le_bytes(bytes: [u8; 16]) -> $Ty {
+                let src = &bytes[..mem::size_of::<$Ty>()];
+
+                <$Ty>::from_le_bytes(src.try_into().unwrap())
+            }
+
+            fn to_le_bytes(value: $Ty) -> [u8; 16] {
+                let bytes = value.to_le_bytes();
+
+                let mut result = [0u8; 16];
+                let dst = &mut result[..mem::size_of::<$Ty>()];
+                dst.copy_from_slice(&bytes);
+
+                result
+            }
+        }
+    };
+}
+
+// Implemente LeBytes for unsigned integers.
+impl_le_bytes!(u8);
+impl_le_bytes!(u16);
+impl_le_bytes!(u32);
+impl_le_bytes!(u64);
+impl_le_bytes!(u128);
+
+// Implement LeBytes for signed integers.
+impl_le_bytes!(i8);
+impl_le_bytes!(i16);
+impl_le_bytes!(i32);
+impl_le_bytes!(i64);
+impl_le_bytes!(i128);
 
 #[cfg(test)]
 mod tests {
@@ -380,11 +478,11 @@ mod tests {
 
     #[test]
     fn mmu_new() {
-        let mmu = Mmu::new(16);
+        let mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         let want = Mmu {
-            size: 16,
-            memory: vec![0; 16],
-            perms: vec![Perm(0); 16],
+            size: DIRTY_BLOCK_SIZE,
+            memory: vec![0; DIRTY_BLOCK_SIZE],
+            perms: vec![Perm(0); DIRTY_BLOCK_SIZE],
             dirty: vec![],
             dirty_bitmap: vec![0; 1],
         };
@@ -394,16 +492,15 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn mmu_new_zero_size() {
-        Mmu::new(0);
+    fn mmu_new_small_size() {
+        Mmu::new(DIRTY_BLOCK_SIZE - 1);
     }
 
     #[test]
     fn mmu_check_perms() {
-        let mut mmu = Mmu::new(16);
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         mmu.set_perms(VirtAddr(0), 8, Perm(PERM_WRITE | PERM_READ))
             .unwrap();
-
         mmu.check_perms(VirtAddr(0), 8, Perm(PERM_WRITE | PERM_READ))
             .unwrap();
     }
@@ -411,7 +508,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn mmu_check_perms_subset() {
-        let mut mmu = Mmu::new(16);
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         mmu.set_perms(VirtAddr(0), 8, Perm(PERM_WRITE)).unwrap();
 
         mmu.check_perms(VirtAddr(0), 8, Perm(PERM_WRITE | PERM_READ))
@@ -420,8 +517,12 @@ mod tests {
 
     #[test]
     fn mmu_check_perms_oob() {
-        let mut mmu = Mmu::new(16);
-        match mmu.set_perms(VirtAddr(5), 16, Perm(PERM_WRITE)) {
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
+        match mmu.set_perms(
+            VirtAddr(DIRTY_BLOCK_SIZE + 5),
+            16,
+            Perm(PERM_WRITE),
+        ) {
             Err(Error::InvalidAddress { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
@@ -430,7 +531,7 @@ mod tests {
 
     #[test]
     fn mmu_check_perms_integer_overflow() {
-        let mut mmu = Mmu::new(16);
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         match mmu.set_perms(VirtAddr(usize::MAX), 1, Perm(PERM_WRITE)) {
             Err(Error::AddressIntegerOverflow { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
@@ -440,7 +541,7 @@ mod tests {
 
     #[test]
     fn mmu_poke_peek() {
-        let mut mmu = Mmu::new(4);
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         mmu.poke(VirtAddr(0), &[1, 2, 3, 4]).unwrap();
 
         let mut got = [0u8; 4];
@@ -451,7 +552,7 @@ mod tests {
 
     #[test]
     fn mmu_write_read() {
-        let mut mmu = Mmu::new(4);
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
 
         mmu.set_perms(VirtAddr(0), 4, Perm(PERM_READ | PERM_WRITE))
             .unwrap();
@@ -465,7 +566,7 @@ mod tests {
 
     #[test]
     fn mmu_write_not_allowed() {
-        let mut mmu = Mmu::new(4);
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         match mmu.write(VirtAddr(0), &[1, 2, 3, 4]) {
             Err(Error::NotAllowed { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
@@ -475,7 +576,7 @@ mod tests {
 
     #[test]
     fn mmu_read_not_allowed() {
-        let mmu = Mmu::new(4);
+        let mmu = Mmu::new(DIRTY_BLOCK_SIZE);
 
         let mut tmp = [0u8; 2];
         match mmu.read(VirtAddr(0), &mut tmp) {
@@ -487,14 +588,14 @@ mod tests {
 
     #[test]
     fn mmu_raw_after_write() {
-        let mut mmu = Mmu::new(4);
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         mmu.set_perms(VirtAddr(0), 3, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
         mmu.write(VirtAddr(0), &[1, 2]).unwrap();
 
-        assert_eq!(mmu.memory, &[1, 2, 0, 0]);
+        assert_eq!(&mmu.memory[..4], &[1, 2, 0, 0]);
         assert_eq!(
-            &mmu.perms,
+            &mmu.perms[..4],
             &[
                 Perm(PERM_WRITE | PERM_READ),
                 Perm(PERM_WRITE | PERM_READ),
@@ -506,7 +607,7 @@ mod tests {
 
     #[test]
     fn mmu_raw_ok() {
-        let mut mmu = Mmu::new(4);
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         mmu.set_perms(VirtAddr(0), 2, Perm(PERM_READ | PERM_WRITE))
             .unwrap();
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
@@ -521,7 +622,7 @@ mod tests {
 
     #[test]
     fn mmu_raw_unitialized() {
-        let mut mmu = Mmu::new(4);
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         mmu.set_perms(VirtAddr(0), 2, Perm(PERM_READ)).unwrap();
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
@@ -536,7 +637,7 @@ mod tests {
 
     #[test]
     fn mmu_raw_not_allowed() {
-        let mut mmu = Mmu::new(4);
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         mmu.set_perms(VirtAddr(0), 2, Perm(PERM_WRITE)).unwrap();
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
             .unwrap();
@@ -551,85 +652,211 @@ mod tests {
 
     #[test]
     fn mmu_reset() {
-        let mmu = Mmu::new(1024 * 1024);
+        let mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
         let mut mmu_fork = mmu.fork();
 
         mmu_fork
-            .set_perms(VirtAddr(1028), 4, Perm(PERM_WRITE))
+            .set_perms(VirtAddr(DIRTY_BLOCK_SIZE + 4), 4, Perm(PERM_WRITE))
             .unwrap();
-        mmu_fork.write(VirtAddr(1028), &[1, 2, 3, 4]).unwrap();
+        mmu_fork
+            .write(VirtAddr(DIRTY_BLOCK_SIZE + 4), &[1, 2, 3, 4])
+            .unwrap();
 
         let mut got = [0u8; 4];
 
-        mmu_fork.peek(VirtAddr(1028), &mut got).unwrap();
+        mmu_fork
+            .peek(VirtAddr(DIRTY_BLOCK_SIZE + 4), &mut got)
+            .unwrap();
         assert_eq!(&got, &[1, 2, 3, 4]);
 
         mmu_fork.reset(&mmu);
 
-        mmu_fork.peek(VirtAddr(1028), &mut got).unwrap();
+        mmu_fork
+            .peek(VirtAddr(DIRTY_BLOCK_SIZE + 4), &mut got)
+            .unwrap();
         assert_eq!(&got, &[0, 0, 0, 0]);
     }
 
     #[test]
     fn mmu_reset_two_blocks() {
-        let mmu = Mmu::new(1024 * 1024);
+        let mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
         let mut mmu_fork = mmu.fork();
 
         mmu_fork
-            .set_perms(VirtAddr(1022), 4, Perm(PERM_WRITE))
+            .set_perms(VirtAddr(DIRTY_BLOCK_SIZE - 2), 4, Perm(PERM_WRITE))
             .unwrap();
-        mmu_fork.write(VirtAddr(1022), &[1, 2, 3, 4]).unwrap();
+        mmu_fork
+            .write(VirtAddr(DIRTY_BLOCK_SIZE - 2), &[1, 2, 3, 4])
+            .unwrap();
 
         let mut got = [0u8; 4];
 
-        mmu_fork.peek(VirtAddr(1022), &mut got).unwrap();
+        mmu_fork
+            .peek(VirtAddr(DIRTY_BLOCK_SIZE - 2), &mut got)
+            .unwrap();
         assert_eq!(&got, &[1, 2, 3, 4]);
 
         mmu_fork.reset(&mmu);
 
-        mmu_fork.peek(VirtAddr(1022), &mut got).unwrap();
+        mmu_fork
+            .peek(VirtAddr(DIRTY_BLOCK_SIZE - 2), &mut got)
+            .unwrap();
         assert_eq!(&got, &[0, 0, 0, 0]);
     }
 
     #[test]
     fn mmu_reset_one_of_two_blocks() {
-        let mmu = Mmu::new(1024 * 1024);
+        let mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
         let mut mmu_fork = mmu.fork();
 
-        mmu_fork.poke(VirtAddr(1022), &[1, 2, 3, 4]).unwrap();
+        mmu_fork
+            .poke(VirtAddr(DIRTY_BLOCK_SIZE - 2), &[1, 2, 3, 4])
+            .unwrap();
         mmu_fork
             .set_perms(VirtAddr(1024), 2, Perm(PERM_WRITE))
             .unwrap();
 
         let mut got = [0u8; 4];
 
-        mmu_fork.peek(VirtAddr(1022), &mut got).unwrap();
+        mmu_fork
+            .peek(VirtAddr(DIRTY_BLOCK_SIZE - 2), &mut got)
+            .unwrap();
         assert_eq!(&got, &[1, 2, 3, 4]);
 
         mmu_fork.reset(&mmu);
 
-        mmu_fork.peek(VirtAddr(1022), &mut got).unwrap();
+        mmu_fork
+            .peek(VirtAddr(DIRTY_BLOCK_SIZE - 2), &mut got)
+            .unwrap();
         assert_eq!(&got, &[1, 2, 0, 0]);
     }
 
     #[test]
     fn mmu_reset_all() {
-        let mmu = Mmu::new(1024 * 1024);
+        let mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
         let mut mmu_fork = mmu.fork();
 
         mmu_fork
-            .set_perms(VirtAddr(0), 1024 * 1024, Perm(PERM_WRITE | PERM_RAW))
+            .set_perms(
+                VirtAddr(0),
+                1024 * DIRTY_BLOCK_SIZE,
+                Perm(PERM_WRITE | PERM_RAW),
+            )
             .unwrap();
-        mmu_fork.write(VirtAddr(1028), &[1, 2, 3, 4]).unwrap();
+        mmu_fork
+            .write(VirtAddr(DIRTY_BLOCK_SIZE + 4), &[1, 2, 3, 4])
+            .unwrap();
 
         let mut got = [0u8; 4];
 
-        mmu_fork.read(VirtAddr(1028), &mut got).unwrap();
+        mmu_fork
+            .read(VirtAddr(DIRTY_BLOCK_SIZE + 4), &mut got)
+            .unwrap();
         assert_eq!(&got, &[1, 2, 3, 4]);
 
         mmu_fork.reset(&mmu);
 
         mmu_fork.peek(VirtAddr(4), &mut got).unwrap();
         assert_eq!(&got, &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mmu_write_read_int() {
+        let mut mmu_init = Mmu::new(DIRTY_BLOCK_SIZE);
+
+        mmu_init
+            .set_perms(
+                VirtAddr(0),
+                DIRTY_BLOCK_SIZE,
+                Perm(PERM_READ | PERM_WRITE),
+            )
+            .unwrap();
+
+        let mut mmu = mmu_init.fork();
+
+        const VAL_U8: u8 = 0x11;
+        const VAL_U16: u16 = 0x1122;
+        const VAL_U32: u32 = 0x11223344;
+        const VAL_U64: u64 = 0x1122334455667788;
+        const VAL_U128: u128 = 0x11223344556677881122334455667788;
+
+        // u8
+        mmu.write_int::<u8>(VirtAddr(0), VAL_U8).unwrap();
+        let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
+        assert_eq!(got, VAL_U8 as u128);
+
+        // u16
+        mmu.reset(&mmu_init);
+        mmu.write_int::<u16>(VirtAddr(0), VAL_U16).unwrap();
+        let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
+        assert_eq!(got, VAL_U16 as u128);
+
+        // u32
+        mmu.reset(&mmu_init);
+        mmu.write_int::<u32>(VirtAddr(0), VAL_U32).unwrap();
+        let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
+        assert_eq!(got, VAL_U32 as u128);
+
+        // u64
+        mmu.reset(&mmu_init);
+        mmu.write_int::<u64>(VirtAddr(0), VAL_U64).unwrap();
+        let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
+        assert_eq!(got, VAL_U64 as u128);
+
+        // u128
+        mmu.reset(&mmu_init);
+        mmu.write_int::<u128>(VirtAddr(0), VAL_U128).unwrap();
+        let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
+        assert_eq!(got, VAL_U128 as u128);
+    }
+
+    #[test]
+    fn mmu_poke_peek_int() {
+        let mut mmu_init = Mmu::new(DIRTY_BLOCK_SIZE);
+
+        mmu_init
+            .set_perms(
+                VirtAddr(0),
+                DIRTY_BLOCK_SIZE,
+                Perm(PERM_READ | PERM_WRITE),
+            )
+            .unwrap();
+
+        let mut mmu = mmu_init.fork();
+
+        const VAL_U8: u8 = 0x11;
+        const VAL_U16: u16 = 0x1122;
+        const VAL_U32: u32 = 0x11223344;
+        const VAL_U64: u64 = 0x1122334455667788;
+        const VAL_U128: u128 = 0x11223344556677881122334455667788;
+
+        // u8
+        mmu.poke_int::<u8>(VirtAddr(0), VAL_U8).unwrap();
+        let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
+        assert_eq!(got, VAL_U8 as u128);
+
+        // u16
+        mmu.reset(&mmu_init);
+        mmu.poke_int::<u16>(VirtAddr(0), VAL_U16).unwrap();
+        let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
+        assert_eq!(got, VAL_U16 as u128);
+
+        // u32
+        mmu.reset(&mmu_init);
+        mmu.poke_int::<u32>(VirtAddr(0), VAL_U32).unwrap();
+        let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
+        assert_eq!(got, VAL_U32 as u128);
+
+        // u64
+        mmu.reset(&mmu_init);
+        mmu.poke_int::<u64>(VirtAddr(0), VAL_U64).unwrap();
+        let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
+        assert_eq!(got, VAL_U64 as u128);
+
+        // u128
+        mmu.reset(&mmu_init);
+        mmu.poke_int::<u128>(VirtAddr(0), VAL_U128).unwrap();
+        let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
+        assert_eq!(got, VAL_U128 as u128);
     }
 }

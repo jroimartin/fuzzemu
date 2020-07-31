@@ -12,7 +12,7 @@ use riscv_emu::mmu::{Perm, VirtAddr, PERM_READ, PERM_WRITE};
 const NCORES: usize = 1;
 
 /// Print debug information, like stdout output and debug messages.
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
 /// Statistics recorded during the fuzzing session.
 #[derive(Default)]
@@ -133,8 +133,8 @@ fn worker(emu_init: Arc<Emulator>, stats: Arc<Mutex<Stats>>) {
                     println!("{}", vmexit);
                 }
 
+                // TODO(rm): Handle crashes as well as unexpected errors.
                 if vmexit.is_crash() {
-                    // TODO(rm): Handle the crashes.
                     local_stats.crashes += 1;
                 }
             }
@@ -148,7 +148,7 @@ fn worker(emu_init: Arc<Emulator>, stats: Arc<Mutex<Stats>>) {
 
         stats.fuzz_cases += local_stats.fuzz_cases;
         stats.crashes += local_stats.crashes;
-        stats.total_inst+= local_stats.total_inst;
+        stats.total_inst += local_stats.total_inst;
         stats.reset_cycles += local_stats.reset_cycles;
         stats.vm_cycles += local_stats.vm_cycles;
 
@@ -159,6 +159,7 @@ fn worker(emu_init: Arc<Emulator>, stats: Arc<Mutex<Stats>>) {
 fn main() {
     const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
     const STACK_SIZE: usize = 1024 * 1024;
+    const ARGV_BASE: usize = VM_MEM_SIZE - 128;
 
     let mut emu_init = Emulator::new(VM_MEM_SIZE);
 
@@ -182,8 +183,19 @@ fn main() {
             eprintln!("error: could not create stack: {}", err);
             process::exit(1);
         });
+
+    // TODO(rm): Set up ARGV properly.
+    emu_init.mmu.poke(VirtAddr(ARGV_BASE), b"whatever").unwrap();
     emu_init
-        .set_reg(RegAlias::Sp, VM_MEM_SIZE as u64 - 128)
+        .mmu
+        .poke_int::<u64>(VirtAddr(ARGV_BASE - 8), ARGV_BASE as u64)
+        .unwrap();
+    emu_init
+        .mmu
+        .poke_int::<u64>(VirtAddr(ARGV_BASE - 16), 1)
+        .unwrap();
+    emu_init
+        .set_reg(RegAlias::Sp, ARGV_BASE as u64 - 16)
         .unwrap_or_else(|err| {
             eprintln!("error: could not set the stack pointer: {}", err);
             process::exit(1);
@@ -218,9 +230,16 @@ fn main() {
         let reset_time = stats.reset_cycles as f64 / stats.total_cycles as f64;
         let vm_time = stats.vm_cycles as f64 / stats.total_cycles as f64;
 
-        println!("[{:10.4}] cases {:10} | {:10.1} fcps | {:10.1} inst/s | \
-                 crashes {:5} | reset {:6.4} | vm {:6.4}",
-                 elapsed, stats.fuzz_cases, fcps, instps, stats.crashes,
-                 reset_time, vm_time);
+        println!(
+            "[{:10.4}] cases {:10} | {:10.1} fcps | {:10.1} inst/s | \
+            crashes {:5} | reset {:6.4} | vm {:6.4}",
+            elapsed,
+            stats.fuzz_cases,
+            fcps,
+            instps,
+            stats.crashes,
+            reset_time,
+            vm_time
+        );
     }
 }

@@ -31,6 +31,7 @@ pub enum VmExit {
 }
 
 impl VmExit {
+    /// Returns true if the VmExit value comes from a crash.
     pub fn is_crash(&self) -> bool {
         false
     }
