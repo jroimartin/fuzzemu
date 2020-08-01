@@ -286,13 +286,13 @@ impl Mmu {
         Ok(())
     }
 
-    /// Copy the data starting in the specified memory address into `dst`.
+    /// Copy the data starting at the specified memory address into `dst`.
     /// This function will fail if the source memory is not readable.
     pub fn read(&self, addr: VirtAddr, dst: &mut [u8]) -> Result<(), Error> {
         self.read_with_perms(addr, dst, Perm(PERM_READ))
     }
 
-    /// Copy the data starting in the specified memory address into `dst`.
+    /// Copy the data starting at the specified memory address into `dst`.
     /// This function will fail if the source memory does not satisfy the
     /// expected permissions.
     pub fn read_with_perms(
@@ -336,7 +336,7 @@ impl Mmu {
         Ok(())
     }
 
-    /// Copy the data starting in the specified memory address into `dst`.
+    /// Copy the data starting at the specified memory address into `dst`.
     /// This function does not check memory permissions.
     pub fn peek(&self, addr: VirtAddr, dst: &mut [u8]) -> Result<(), Error> {
         let size = dst.len();
@@ -383,7 +383,8 @@ impl Mmu {
         value: T::Target,
     ) -> Result<(), Error> {
         let bytes = T::to_le_bytes(value);
-        self.write(addr, &bytes[..mem::size_of::<T::Target>()])?;
+        let src = &bytes[..mem::size_of::<T::Target>()];
+        self.write(addr, src)?;
         Ok(())
     }
 
@@ -394,7 +395,22 @@ impl Mmu {
         addr: VirtAddr,
     ) -> Result<T::Target, Error> {
         let mut bytes = [0u8; 16];
-        self.read(addr, &mut bytes[..mem::size_of::<T::Target>()])?;
+        let dst = &mut bytes[..mem::size_of::<T::Target>()];
+        self.read(addr, dst)?;
+        Ok(T::from_le_bytes(bytes))
+    }
+
+    /// Copy the data starting at the specified memory address into `dst`.
+    /// This function will fail if the source memory does not satisfy the
+    /// expected permissions.
+    pub fn read_int_with_perms<T: LeBytes>(
+        &self,
+        addr: VirtAddr,
+        perms: Perm,
+    ) -> Result<T::Target, Error> {
+        let mut bytes = [0u8; 16];
+        let dst = &mut bytes[..mem::size_of::<T::Target>()];
+        self.read_with_perms(addr, dst, perms)?;
         Ok(T::from_le_bytes(bytes))
     }
 
@@ -406,7 +422,8 @@ impl Mmu {
         value: T::Target,
     ) -> Result<(), Error> {
         let bytes = T::to_le_bytes(value);
-        self.poke(addr, &bytes[..mem::size_of::<T::Target>()])?;
+        let src = &bytes[..mem::size_of::<T::Target>()];
+        self.poke(addr, src)?;
         Ok(())
     }
 
@@ -417,7 +434,8 @@ impl Mmu {
         addr: VirtAddr,
     ) -> Result<T::Target, Error> {
         let mut bytes = [0u8; 16];
-        self.peek(addr, &mut bytes[..mem::size_of::<T::Target>()])?;
+        let dst = &mut bytes[..mem::size_of::<T::Target>()];
+        self.peek(addr, dst)?;
         Ok(T::from_le_bytes(bytes))
     }
 }

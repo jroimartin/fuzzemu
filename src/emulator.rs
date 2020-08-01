@@ -433,14 +433,10 @@ impl Emulator {
         loop {
             let pc = self.get_reg(RegAlias::Pc)?;
 
-            let mut bytes = [0u8; 4];
-            self.mmu.read_with_perms(
+            let inst = self.mmu.read_int_with_perms::<u32>(
                 VirtAddr(pc as usize),
-                &mut bytes,
                 Perm(PERM_EXEC),
             )?;
-
-            let inst = u32::from_le_bytes(bytes);
 
             *inst_execed += 1;
 
@@ -590,51 +586,37 @@ impl Emulator {
                 match dec.funct3 {
                     0b000 => {
                         // LB
-                        let mut bytes = [0u8; 1];
-                        self.mmu.read(vaddr, &mut bytes)?;
-                        let value = bytes[0];
-                        self.set_reg(dec.rd, value as i8 as u64)?;
+                        let value = self.mmu.read_int::<i8>(vaddr)?;
+                        self.set_reg(dec.rd, value as u64)?;
                     }
                     0b001 => {
                         // LH
-                        let mut bytes = [0u8; 2];
-                        self.mmu.read(vaddr, &mut bytes)?;
-                        let value = u16::from_le_bytes(bytes);
-                        self.set_reg(dec.rd, value as i16 as u64)?;
+                        let value = self.mmu.read_int::<i16>(vaddr)?;
+                        self.set_reg(dec.rd, value as u64)?;
                     }
                     0b010 => {
                         // LW
-                        let mut bytes = [0u8; 4];
-                        self.mmu.read(vaddr, &mut bytes)?;
-                        let value = u32::from_le_bytes(bytes);
-                        self.set_reg(dec.rd, value as i32 as u64)?;
+                        let value = self.mmu.read_int::<i32>(vaddr)?;
+                        self.set_reg(dec.rd, value as u64)?;
                     }
                     0b100 => {
                         // LBU
-                        let mut bytes = [0u8; 1];
-                        self.mmu.read(vaddr, &mut bytes)?;
-                        let value = bytes[0];
+                        let value = self.mmu.read_int::<u8>(vaddr)?;
                         self.set_reg(dec.rd, value as u64)?;
                     }
                     0b101 => {
                         // LHU
-                        let mut bytes = [0u8; 2];
-                        self.mmu.read(vaddr, &mut bytes)?;
-                        let value = u16::from_le_bytes(bytes);
+                        let value = self.mmu.read_int::<u16>(vaddr)?;
                         self.set_reg(dec.rd, value as u64)?;
                     }
                     0b110 => {
                         // LWU
-                        let mut bytes = [0u8; 4];
-                        self.mmu.read(vaddr, &mut bytes)?;
-                        let value = u32::from_le_bytes(bytes);
+                        let value = self.mmu.read_int::<u32>(vaddr)?;
                         self.set_reg(dec.rd, value as u64)?;
                     }
                     0b011 => {
                         // LD
-                        let mut bytes = [0u8; 8];
-                        self.mmu.read(vaddr, &mut bytes)?;
-                        let value = u64::from_le_bytes(bytes);
+                        let value = self.mmu.read_int::<u64>(vaddr)?;
                         self.set_reg(dec.rd, value)?;
                     }
                     _ => return Err(VmExit::InvalidInstruction),
@@ -653,23 +635,19 @@ impl Emulator {
                 match dec.funct3 {
                     0b000 => {
                         //SB
-                        let value = (rs2 as u8).to_le_bytes();
-                        self.mmu.write(vaddr, &value)?;
+                        self.mmu.write_int::<u8>(vaddr, rs2 as u8)?;
                     }
                     0b001 => {
                         //SH
-                        let value = (rs2 as u16).to_le_bytes();
-                        self.mmu.write(vaddr, &value)?;
+                        self.mmu.write_int::<u16>(vaddr, rs2 as u16)?;
                     }
                     0b010 => {
                         //SW
-                        let value = (rs2 as u32).to_le_bytes();
-                        self.mmu.write(vaddr, &value)?;
+                        self.mmu.write_int::<u32>(vaddr, rs2 as u32)?;
                     }
                     0b011 => {
                         //SD
-                        let value = rs2.to_le_bytes();
-                        self.mmu.write(vaddr, &value)?;
+                        self.mmu.write_int::<u64>(vaddr, rs2)?;
                     }
                     _ => return Err(VmExit::InvalidInstruction),
                 }
