@@ -198,7 +198,7 @@ impl Fuzzer {
         }
 
         // Initialize the new allocated memory as read-after-write, so we can
-        // detect accesses to initialized memory.
+        // detect accesses to unitialized memory.
         emu.mmu.set_perms(
             self.brk_addr,
             increment,
@@ -238,17 +238,17 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), VmExit> {
     )?;
 
     // Store program args
-    emu.mmu.write(VirtAddr(argv_base), b"argv0\x00").unwrap();
-    emu.mmu.write(VirtAddr(argv_base + 32), b"argv1\x00")?;
+    emu.mmu.poke(VirtAddr(argv_base), b"argv0\x00").unwrap();
+    emu.mmu.poke(VirtAddr(argv_base + 32), b"argv1\x00")?;
 
     // Store argc
-    emu.mmu.write_int::<u64>(VirtAddr(stack_init), 2)?;
+    emu.mmu.poke_int::<u64>(VirtAddr(stack_init), 2)?;
 
     // Store pointers to program args
     emu.mmu
-        .write_int::<u64>(VirtAddr(stack_init + 8), argv_base as u64)?;
+        .poke_int::<u64>(VirtAddr(stack_init + 8), argv_base as u64)?;
     emu.mmu
-        .write_int::<u64>(VirtAddr(stack_init + 16), argv_base as u64 + 32)?;
+        .poke_int::<u64>(VirtAddr(stack_init + 16), argv_base as u64 + 32)?;
 
     // Set SP
     emu.set_reg(RegAlias::Sp, stack_init as u64)?;
