@@ -162,13 +162,16 @@ fn worker(emu_init: Arc<Emulator>, stats: Arc<Mutex<Stats>>) {
     }
 }
 
-/// Set up a stack with a size of `STACK_SIZE` bytes.
+/// Set up a stack with a size of `STACK_SIZE` bytes. It also configures
+/// the command line argumets passed to the program.
 ///
 /// # Panics
 ///
 /// This function will panic if the memory size of the VM is not higher than
-/// `STACK_SIZE`.
+/// `STACK_SIZE` or `STACK_SIZE` is not higher than 1024.
 fn setup_stack(emu: &mut Emulator) -> Result<(), VmExit> {
+    assert!(STACK_SIZE > 1024, "STACK_SIZE is not big enough");
+
     let mem_size = emu.mmu.size();
 
     assert!(mem_size > STACK_SIZE, "the VM memory is not big enough");
