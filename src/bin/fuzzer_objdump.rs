@@ -14,6 +14,11 @@ const NCORES: usize = 1;
 /// Print debug information, like stdout output and debug messages.
 const DEBUG: bool = true;
 
+/// Amount of memory reserved for the stack at the end of the VM memory. Note
+/// that 1024 bytes will be reserved to store the program arguments, so this
+/// value must be bigger than 1024.
+const STACK_SIZE: usize = 1024 * 1024;
+
 /// Statistics recorded during the fuzzing session.
 #[derive(Default)]
 struct Stats {
@@ -47,6 +52,7 @@ fn handle_syscall(emu: &mut Emulator) -> Result<(), VmExit> {
     let pc = emu.get_reg(RegAlias::Pc)?;
 
     match syscall_number {
+        // TODO(rm): Implement syscalls.
         57 => {
             // close
             emu.set_reg(RegAlias::A0, !0)?;
@@ -62,7 +68,7 @@ fn handle_syscall(emu: &mut Emulator) -> Result<(), VmExit> {
                 emu.mmu.peek(VirtAddr(buf_ptr as usize), &mut bytes)?;
                 let buf = String::from_utf8(bytes)
                     .unwrap_or_else(|_| String::from("(invalid string)"));
-                println!("fd={} count={} buf={}", fd, count, buf);
+                println!("fd={} count={}\n{}", fd, count, buf);
             }
 
             emu.set_reg(RegAlias::A0, count)?;
@@ -156,10 +162,48 @@ fn worker(emu_init: Arc<Emulator>, stats: Arc<Mutex<Stats>>) {
     }
 }
 
+/// Set up a stack with a size of `STACK_SIZE` bytes.
+///
+/// # Panics
+///
+/// This function will panic if the memory size of the VM is not higher than
+/// `STACK_SIZE`.
+fn setup_stack(emu: &mut Emulator) -> Result<(), VmExit> {
+    let mem_size = emu.mmu.size();
+
+    assert!(mem_size > STACK_SIZE, "the VM memory is not big enough");
+
+    let argv_base: usize = mem_size - 512;
+    let stack_init: usize = mem_size - 1024;
+
+    // Create the stack and set the stack pointer.
+    emu.mmu.set_perms(
+        VirtAddr(mem_size - STACK_SIZE),
+        STACK_SIZE,
+        Perm(PERM_READ | PERM_WRITE),
+    )?;
+
+    // Store program args
+    emu.mmu.poke(VirtAddr(argv_base), b"argv0").unwrap();
+    emu.mmu.poke(VirtAddr(argv_base + 32), b"argv1")?;
+
+    // Store argc
+    emu.mmu.poke_int::<u64>(VirtAddr(stack_init), 2)?;
+
+    // Store pointers to program args
+    emu.mmu
+        .poke_int::<u64>(VirtAddr(stack_init + 8), argv_base as u64)?;
+    emu.mmu
+        .poke_int::<u64>(VirtAddr(stack_init + 16), argv_base as u64 + 32)?;
+
+    // Set SP
+    emu.set_reg(RegAlias::Sp, stack_init as u64)?;
+
+    Ok(())
+}
+
 fn main() {
     const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
-    const STACK_SIZE: usize = 1024 * 1024;
-    const ARGV_BASE: usize = VM_MEM_SIZE - 128;
 
     let mut emu_init = Emulator::new(VM_MEM_SIZE);
 
@@ -171,35 +215,11 @@ fn main() {
             process::exit(1);
         });
 
-    // Create the stack and set the stack pointer.
-    emu_init
-        .mmu
-        .set_perms(
-            VirtAddr(VM_MEM_SIZE - STACK_SIZE),
-            STACK_SIZE,
-            Perm(PERM_READ | PERM_WRITE),
-        )
-        .unwrap_or_else(|err| {
-            eprintln!("error: could not create stack: {}", err);
-            process::exit(1);
-        });
-
-    // TODO(rm): Set up ARGV properly.
-    emu_init.mmu.poke(VirtAddr(ARGV_BASE), b"whatever").unwrap();
-    emu_init
-        .mmu
-        .poke_int::<u64>(VirtAddr(ARGV_BASE - 8), ARGV_BASE as u64)
-        .unwrap();
-    emu_init
-        .mmu
-        .poke_int::<u64>(VirtAddr(ARGV_BASE - 16), 1)
-        .unwrap();
-    emu_init
-        .set_reg(RegAlias::Sp, ARGV_BASE as u64 - 16)
-        .unwrap_or_else(|err| {
-            eprintln!("error: could not set the stack pointer: {}", err);
-            process::exit(1);
-        });
+    // Set up the stack.
+    setup_stack(&mut emu_init).unwrap_or_else(|err| {
+        eprintln!("error: could not set up the stack: {}", err);
+        process::exit(1);
+    });
 
     // `emu_init` and `stats` will be shared among threads. So, we have to wrap
     // them inside `Arc`. In the case of `stats`, it will be modified by the

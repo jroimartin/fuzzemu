@@ -213,14 +213,14 @@ mod tests {
                 Phdr {
                     offset: 0x0000000000000000,
                     virt_addr: VirtAddr(0x0000000000010000),
-                    file_size: 0x0000000000012868,
-                    mem_size: 0x0000000000012868,
+                    file_size: 0x0000000000012888,
+                    mem_size: 0x0000000000012888,
                     perms: Perm(PERM_READ | PERM_EXEC),
                     align: 0x1000,
                 },
                 Phdr {
-                    offset: 0x0000000000012868,
-                    virt_addr: VirtAddr(0x0000000000023868),
+                    offset: 0x0000000000012888,
+                    virt_addr: VirtAddr(0x0000000000023888),
                     file_size: 0x0000000000001178,
                     mem_size: 0x0000000000001208,
                     perms: Perm(PERM_READ | PERM_WRITE),

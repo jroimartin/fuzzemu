@@ -166,6 +166,11 @@ impl Mmu {
         }
     }
 
+    /// Returns the size of the memory.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
     /// Returns a copy of the MMU. It marks all memory as clean in the new
     /// copy.
     pub fn fork(&self) -> Mmu {
