@@ -1,5 +1,6 @@
 //! RISC-V emulator (little-endian rv64i only).
 
+use std::cmp;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -345,13 +346,16 @@ impl Emulator {
     }
 
     /// Loads an ELF program in the emulator. It also points the program
-    /// counter to the entrypoint of the program.
+    /// counter to the entrypoint of the program. The function returns the
+    /// address of the first byte after the end of the program memory.
     pub fn load_program<P: AsRef<Path>>(
         &mut self,
         program: P,
-    ) -> Result<(), VmExit> {
+    ) -> Result<VirtAddr, VmExit> {
         let contents = fs::read(program)?;
         let elf = Elf::parse(&contents)?;
+
+        let mut max_addr = 0;
 
         for phdr in elf.phdrs() {
             let file_offset = phdr.offset();
@@ -368,12 +372,18 @@ impl Emulator {
 
             self.mmu.poke(mem_start, file_bytes)?;
             self.mmu.set_perms(mem_start, mem_size, phdr.perms())?;
+
+            // We don't need to use checked_add() here because this has been
+            // already checked in the previous call to set_perms().
+            let mem_end = *mem_start + mem_size;
+
+            max_addr = cmp::max(max_addr, mem_end);
         }
 
         // Place the program counter in the entrypoint.
         self.set_reg(RegAlias::Pc, *elf.entry() as u64)?;
 
-        Ok(())
+        Ok(VirtAddr(max_addr))
     }
 
     /// Returns a copy of the Emulator, including its internal state.
