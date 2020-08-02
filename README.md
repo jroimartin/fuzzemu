@@ -8,3 +8,15 @@ during the **Fuzz Week** for learning purposes and experimentation.
 - [Blog post](https://gamozolabs.github.io/2020/07/12/fuzz_week_2020.html)
 - [GitHub repository](https://github.com/gamozolabs/fuzz_with_emus/)
 - [YouTube playlist](https://www.youtube.com/playlist?list=PLSkhUfcCXvqHsOy2VUxuoAf5m_7c8RqvO)
+
+## Notes
+
+### Build riscv-gnu-toolchain
+
+```
+$ sudo apt-get install autoconf automake autotools-dev curl python3 libmpc-dev libmpfr-dev libgmp-dev gawk build-essential bison flex texinfo gperf libtool patchutils bc zlib1g-dev libexpat-dev
+$ git clone --recursive https://github.com/riscv/riscv-gnu-toolchain
+$ cd riscv-gnu-toolchain
+$ ./configure --with-arch=rv64i --with-abi=lp64 --prefix=<PREFIX>
+$ make -j 16
+```
