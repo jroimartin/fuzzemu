@@ -52,10 +52,10 @@ fn rdtsc() -> u64 {
 /// A Fuzzer represents a instance of our fuzzer. It links everything together,
 /// for instance, memory allocation, file handling, statistics, etc.
 struct Fuzzer {
-    /// Initial state of the emulator.
+    /// Initial state of the emulator. Shared among all fuzzer instances.
     emu_init: Arc<Emulator>,
 
-    /// Global statistics.
+    /// Global statistics. Shared among all fuzzer instances.
     stats: Arc<Mutex<Stats>>,
 
     /// The program break, which defines the end of the process's data segment.
@@ -63,8 +63,7 @@ struct Fuzzer {
 }
 
 impl Fuzzer {
-    /// This function implements a fuzzer worker. It takes care of executing fuzz
-    /// cases. We spawn one worker per core.
+    /// Start a fuzzer worker. We usually spawn one worker per core.
     fn go(mut self) {
         // Fork the initial emulator state for this worker.
         let mut emu = self.emu_init.fork();
@@ -141,7 +140,7 @@ impl Fuzzer {
             // TODO(rm): Implement syscalls.
             57 => {
                 // close
-                emu.set_reg(RegAlias::A0, !0)?;
+                todo!("[{:#010x}] close syscall is not yet implemented", pc);
             }
             64 => {
                 // write
@@ -161,7 +160,7 @@ impl Fuzzer {
             }
             80 => {
                 // fstat
-                emu.set_reg(RegAlias::A0, !0)?;
+                todo!("[{:#010x}] fstat syscall is not yet implemented", pc);
             }
             93 => {
                 // exit
@@ -170,14 +169,9 @@ impl Fuzzer {
             }
             214 => {
                 // brk
-                let brk = emu.get_reg(RegAlias::A0)?;
-
-                if DEBUG {
-                    eprintln!("brk={:#010x}", brk);
-                }
-                emu.set_reg(RegAlias::A0, !0)?;
+                todo!("[{:#010x}] brk syscall is not yet implemented", pc);
             }
-            _ => todo!("syscall"),
+            _ => todo!("[{:#010x}] unknown syscall", pc),
         }
 
         emu.set_reg(RegAlias::Pc, pc.wrapping_add(4))?;
@@ -238,8 +232,13 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), VmExit> {
     )?;
 
     // Store program args
-    emu.mmu.poke(VirtAddr(argv_base), b"argv0\x00").unwrap();
-    emu.mmu.poke(VirtAddr(argv_base + 32), b"argv1\x00")?;
+    emu.mmu
+        .poke(VirtAddr(argv_base), b"testdata/binutils/objdump-riscv\x00")?;
+    emu.mmu.poke(VirtAddr(argv_base + 32), b"-x\x00")?;
+    emu.mmu.poke(
+        VirtAddr(argv_base + 64),
+        b"testdata/binutils/objdump-riscv\x00",
+    )?;
 
     // Store argc
     emu.mmu.poke_int::<u64>(VirtAddr(stack_init), 2)?;
@@ -249,6 +248,8 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), VmExit> {
         .poke_int::<u64>(VirtAddr(stack_init + 8), argv_base as u64)?;
     emu.mmu
         .poke_int::<u64>(VirtAddr(stack_init + 16), argv_base as u64 + 32)?;
+    emu.mmu
+        .poke_int::<u64>(VirtAddr(stack_init + 32), argv_base as u64 + 64)?;
 
     // Set SP
     emu.set_reg(RegAlias::Sp, stack_init as u64)?;
@@ -260,13 +261,12 @@ fn main() {
     let mut emu_init = Emulator::new(VM_MEM_SIZE);
 
     // Load the program file.
-    let brk_addr =
-        emu_init
-            .load_program("testdata/hello")
-            .unwrap_or_else(|err| {
-                eprintln!("error: could not create emulator: {}", err);
-                process::exit(1);
-            });
+    let brk_addr = emu_init
+        .load_program("testdata/binutils/objdump-riscv")
+        .unwrap_or_else(|err| {
+            eprintln!("error: could not create emulator: {}", err);
+            process::exit(1);
+        });
 
     // Set up the stack.
     setup_stack(&mut emu_init).unwrap_or_else(|err| {
