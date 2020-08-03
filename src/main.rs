@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use riscv_emu::emulator::{Emulator, RegAlias, VmExit};
-use riscv_emu::mmu::{Perm, VirtAddr, PERM_RAW, PERM_READ, PERM_WRITE};
+use riscv_emu::mmu::{self, Perm, VirtAddr, PERM_RAW, PERM_READ, PERM_WRITE};
 
 /// Number of cores to use.
 const NCORES: usize = 1;
@@ -112,6 +112,8 @@ impl Fuzzer {
                     if vmexit.is_crash() {
                         local_stats.crashes += 1;
                     }
+
+                    todo!("stop here for now");
                 }
 
                 // Update local stats.
@@ -145,15 +147,23 @@ impl Fuzzer {
             64 => {
                 // write
                 let fd = emu.get_reg(RegAlias::A0)?;
-                let buf_ptr = emu.get_reg(RegAlias::A1)?;
+                let buf = emu.get_reg(RegAlias::A1)?;
                 let count = emu.get_reg(RegAlias::A2)?;
+
+                if fd != 1 && fd != 2 {
+                    todo!(
+                        "[{:#010x}] write syscall does not support fd {}",
+                        pc,
+                        fd
+                    );
+                }
 
                 if DEBUG {
                     let mut bytes = vec![0; count as usize];
-                    emu.mmu.peek(VirtAddr(buf_ptr as usize), &mut bytes)?;
+                    emu.mmu.peek(VirtAddr(buf as usize), &mut bytes)?;
                     let buf = String::from_utf8(bytes)
                         .unwrap_or_else(|_| String::from("(invalid string)"));
-                    eprintln!("fd={} count={}\n{}", fd, count, buf);
+                    eprint!("{}", buf);
                 }
 
                 emu.set_reg(RegAlias::A0, count)?;
@@ -169,7 +179,74 @@ impl Fuzzer {
             }
             214 => {
                 // brk
-                todo!("[{:#010x}] brk syscall is not yet implemented", pc);
+                let addr = emu.get_reg(RegAlias::A0)?;
+
+                if DEBUG {
+                    println!(
+                        "brk: addr={:#010x} self.brk_addr={}",
+                        addr, self.brk_addr
+                    );
+                }
+
+                if addr == 0 {
+                    emu.set_reg(RegAlias::A0, *self.brk_addr as u64)?;
+                } else {
+                    let increment = addr
+                        .checked_sub(*self.brk_addr as u64)
+                        .ok_or(VmExit::SyscallError(syscall_number))?;
+
+                    if DEBUG {
+                        println!("brk: increment={:#010x}", increment);
+                    }
+
+                    // We call sbrk(), and discard the returned value. On
+                    // success, brk returns the requested address, which is
+                    // already in A0.
+                    self.sbrk(emu, increment as usize)?;
+                }
+            }
+            1024 => {
+                // open
+                todo!("[{:#010x}] open syscall is not yet implemented", pc);
+            }
+            1038 => {
+                // stat
+                //
+                // XXX: This is not a real implementation, we only returned
+                // what is needed to bypass the objdump checks.
+                let path_name = emu.get_reg(RegAlias::A0)?;
+                let statbuf = emu.get_reg(RegAlias::A1)?;
+
+                let path_name = get_cstr(emu, VirtAddr(path_name as usize))?;
+                let path_name = String::from_utf8_lossy(&path_name);
+
+                if DEBUG {
+                    eprintln!("stat: path_name={}", path_name);
+                }
+
+                // bucom.c:621, objdump.c:572
+                // stat() >= 0
+                // statbuf.st_mode == _IFREG
+                // statbuf.st_size > 0
+                //
+                // Received struct:
+                //   https://github.com/riscv/riscv-newlib/blob/f289cef6be67da67b2d97a47d6576fa7e6b4c858/libgloss/riscv/kernel_stat.h
+
+                // Set st_mode
+                let st_mode_addr = statbuf
+                    .checked_add(16)
+                    .ok_or(VmExit::SyscallError(syscall_number))?;
+                let st_mode_addr = VirtAddr(st_mode_addr as usize);
+                emu.mmu.write_int::<u32>(st_mode_addr, 0x8000)?;
+
+                // Set st_size
+                let st_size_addr = statbuf
+                    .checked_add(48)
+                    .ok_or(VmExit::SyscallError(syscall_number))?;
+                let st_size_addr = VirtAddr(st_size_addr as usize);
+                emu.mmu.write_int::<u64>(st_size_addr, 0x1337)?;
+
+                emu.set_reg(RegAlias::A0, 0)?;
             }
             _ => todo!("[{:#010x}] unknown syscall", pc),
         }
@@ -209,6 +286,25 @@ impl Fuzzer {
     }
 }
 
+/// Reads a C string (NULL terminated) from memory at `addr`.
+fn get_cstr(emu: &mut Emulator, addr: VirtAddr) -> Result<Vec<u8>, VmExit> {
+    let mut result = Vec::new();
+    let mut curaddr = addr;
+    loop {
+        let ch = emu.mmu.read_int::<u8>(curaddr)?;
+        if ch == 0 {
+            break Ok(result);
+        }
+        result.push(ch);
+        *curaddr = curaddr.checked_add(1).ok_or(
+            mmu::Error::AddressIntegerOverflow {
+                addr: curaddr,
+                size: 1,
+            },
+        )?;
+    }
+}
+
 /// Set up a stack with a size of `STACK_SIZE` bytes. It also configures
 /// the command line argumets passed to the program.
 ///
@@ -241,7 +337,7 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), VmExit> {
     )?;
 
     // Store argc
-    emu.mmu.poke_int::<u64>(VirtAddr(stack_init), 2)?;
+    emu.mmu.poke_int::<u64>(VirtAddr(stack_init), 3)?;
 
     // Store pointers to program args
     emu.mmu
@@ -249,7 +345,7 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), VmExit> {
     emu.mmu
         .poke_int::<u64>(VirtAddr(stack_init + 16), argv_base as u64 + 32)?;
     emu.mmu
-        .poke_int::<u64>(VirtAddr(stack_init + 32), argv_base as u64 + 64)?;
+        .poke_int::<u64>(VirtAddr(stack_init + 24), argv_base as u64 + 64)?;
 
     // Set SP
     emu.set_reg(RegAlias::Sp, stack_init as u64)?;

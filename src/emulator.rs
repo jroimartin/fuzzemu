@@ -25,6 +25,7 @@ pub enum VmExit {
     InvalidRegister,
     InvalidMemorySegment,
     UnimplementedInstruction,
+    SyscallError(u64),
 
     IoError(io::Error),
     ElfError(elf::Error),
@@ -54,6 +55,9 @@ impl fmt::Display for VmExit {
             }
             VmExit::UnimplementedInstruction => {
                 write!(f, "unimplemented instruction")
+            }
+            VmExit::SyscallError(num) => {
+                write!(f, "error while executing syscall {}", num)
             }
             VmExit::IoError(err) => write!(f, "IO error: {}", err),
             VmExit::ElfError(err) => write!(f, "ELF error: {}", err),

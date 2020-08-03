@@ -4,7 +4,7 @@
 use std::convert::TryInto;
 use std::fmt;
 use std::mem;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
 /// Executable memory. Aimed to be used with `Perm`.
 pub const PERM_EXEC: u8 = 1;
@@ -120,6 +120,12 @@ impl Deref for VirtAddr {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for VirtAddr {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
