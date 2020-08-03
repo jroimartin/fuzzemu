@@ -18,5 +18,5 @@ $ sudo apt-get install autoconf automake autotools-dev curl python3 libmpc-dev l
 $ git clone --recursive https://github.com/riscv/riscv-gnu-toolchain
 $ cd riscv-gnu-toolchain
 $ ./configure --with-arch=rv64i --with-abi=lp64 --prefix=<PREFIX>
-$ make -j 16
+$ make -j <NJOBS>
 ```
