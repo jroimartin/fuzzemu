@@ -115,6 +115,12 @@ impl Deref for Perm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VirtAddr(pub usize);
 
+impl fmt::Display for VirtAddr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:#x}", self.0)
+    }
+}
+
 impl Deref for VirtAddr {
     type Target = usize;
 
@@ -126,12 +132,6 @@ impl Deref for VirtAddr {
 impl DerefMut for VirtAddr {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
-    }
-}
-
-impl fmt::Display for VirtAddr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:#x}", self.0)
     }
 }
 
@@ -244,10 +244,8 @@ impl Mmu {
             .ok_or(Error::InvalidAddress { addr, size })?;
 
         for (i, p) in range.iter().enumerate() {
-            // If we reach this point, we know that addr + size does not
-            // overflow. Given that i < size, we don't need to use
-            // checked_add to calculate the following virtual addresses.
-
+            // At this point, addr + size cannot overflow. Given that i < size,
+            // checked_add is not needed.
             if (*perms & PERM_READ != 0) && (**p & PERM_RAW != 0) {
                 return Err(Error::UnitializedMemory {
                     addr: VirtAddr(*addr + i),

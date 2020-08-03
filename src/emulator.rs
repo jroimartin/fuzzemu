@@ -1,4 +1,5 @@
-//! RISC-V emulator (little-endian rv64i only).
+//! RISC-V emulator. This implementation only supports the RV64i Base Integer
+//! Instruction Set and assumes little-endian.
 
 use std::cmp;
 use std::fmt;
@@ -10,22 +11,20 @@ use std::path::Path;
 use crate::elf::{self, Elf};
 use crate::mmu::{self, Mmu, Perm, VirtAddr, PERM_EXEC};
 
+/// Print debug messages.
 const DEBUG: bool = false;
 
-/// Emulator error.
+/// Emulator's exit reason.
 #[derive(Debug)]
 pub enum VmExit {
-    EBreak,
-    ECall,
-
-    ProgramExit(u64),
+    Ebreak,
+    Ecall,
 
     AddressMisaligned,
     InvalidInstruction,
     InvalidRegister,
     InvalidMemorySegment,
     UnimplementedInstruction,
-    SyscallError(u64),
 
     IoError(io::Error),
     ElfError(elf::Error),
@@ -33,7 +32,7 @@ pub enum VmExit {
 }
 
 impl VmExit {
-    /// Returns true if the VmExit value comes from a crash.
+    /// Returns true if the VmExit variant corresponds to a crash.
     pub fn is_crash(&self) -> bool {
         false
     }
@@ -42,9 +41,8 @@ impl VmExit {
 impl fmt::Display for VmExit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            VmExit::EBreak => write!(f, "EBREAK"),
-            VmExit::ECall => write!(f, "ECALL"),
-            VmExit::ProgramExit(code) => write!(f, "program exit: {}", code),
+            VmExit::Ebreak => write!(f, "EBREAK"),
+            VmExit::Ecall => write!(f, "ECALL"),
             VmExit::AddressMisaligned => {
                 write!(f, "address-missaligned exception")
             }
@@ -55,9 +53,6 @@ impl fmt::Display for VmExit {
             }
             VmExit::UnimplementedInstruction => {
                 write!(f, "unimplemented instruction")
-            }
-            VmExit::SyscallError(num) => {
-                write!(f, "error while executing syscall {}", num)
             }
             VmExit::IoError(err) => write!(f, "IO error: {}", err),
             VmExit::ElfError(err) => write!(f, "ELF error: {}", err),
@@ -72,15 +67,15 @@ impl From<io::Error> for VmExit {
     }
 }
 
-impl From<mmu::Error> for VmExit {
-    fn from(error: mmu::Error) -> VmExit {
-        VmExit::MmuError(error)
-    }
-}
-
 impl From<elf::Error> for VmExit {
     fn from(error: elf::Error) -> VmExit {
         VmExit::ElfError(error)
+    }
+}
+
+impl From<mmu::Error> for VmExit {
+    fn from(error: mmu::Error) -> VmExit {
+        VmExit::MmuError(error)
     }
 }
 
@@ -308,8 +303,7 @@ impl From<u32> for Jtype {
     }
 }
 
-/// RISC-V emulator. This implementation only supports the RV64i Base Integer
-/// Instruction Set and assumes little-endian.
+/// RISC-V emulator.
 pub struct Emulator {
     /// State of the registers.
     regs: [u64; 33],
@@ -377,8 +371,8 @@ impl Emulator {
             self.mmu.poke(mem_start, file_bytes)?;
             self.mmu.set_perms(mem_start, mem_size, phdr.perms())?;
 
-            // We don't need to use checked_add() here because this has been
-            // already checked in the previous call to set_perms().
+            // checked_add() is not needed here because integer overflows have
+            // been already checked in the previous call to set_perms().
             let mem_end = *mem_start + mem_size;
 
             max_addr = cmp::max(max_addr, mem_end);
@@ -846,10 +840,10 @@ impl Emulator {
                 if dec.rd == Reg(0) && dec.funct3 == 0 && dec.rs1 == Reg(0) {
                     if dec.imm == 0 {
                         // ECALL
-                        return Err(VmExit::ECall);
+                        return Err(VmExit::Ecall);
                     } else if dec.imm == 1 {
                         // EBREAK
-                        return Err(VmExit::EBreak);
+                        return Err(VmExit::Ebreak);
                     } else {
                         return Err(VmExit::InvalidInstruction);
                     }

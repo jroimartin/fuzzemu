@@ -11,7 +11,10 @@ use crate::mmu::{Perm, VirtAddr, PERM_EXEC, PERM_READ, PERM_WRITE};
 /// Error related to ELF parsing.
 #[derive(Debug)]
 pub enum Error {
-    /// Malformed file
+    /// Unknown file format.
+    UnknownFormat,
+
+    /// Malformed file.
     MalformedFile,
 
     /// No loadable segments found.
@@ -24,6 +27,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Error::UnknownFormat => write!(f, "unknown file format"),
             Error::MalformedFile => write!(f, "malformed file"),
             Error::NoLoadHeaders => write!(f, "no LOAD program headers"),
             Error::IoError(err) => write!(f, "{}", err),
@@ -112,21 +116,37 @@ impl Elf {
     /// `Elf` structure.
     pub fn parse(contents: &[u8]) -> Result<Elf, Error> {
         // Check ELF magic.
-        if &contents[0..4] != b"\x7fELF" {
-            return Err(Error::MalformedFile);
+        let magic = contents.get(..4).ok_or(Error::MalformedFile)?;
+        if magic != b"\x7fELF" {
+            return Err(Error::UnknownFormat);
         }
 
         // Get entrypoint.
-        let e_entry =
-            usize::from_le_bytes(contents[24..32].try_into().unwrap());
+        let e_entry = usize::from_le_bytes(
+            contents
+                .get(24..32)
+                .ok_or(Error::MalformedFile)?
+                .try_into()
+                .unwrap(),
+        );
 
         // Get program headers offset.
-        let e_phoff =
-            usize::from_le_bytes(contents[32..40].try_into().unwrap());
+        let e_phoff = usize::from_le_bytes(
+            contents
+                .get(32..40)
+                .ok_or(Error::MalformedFile)?
+                .try_into()
+                .unwrap(),
+        );
 
         // Get number of program headers.
-        let e_phnum =
-            u16::from_le_bytes(contents[56..58].try_into().unwrap()) as usize;
+        let e_phnum = u16::from_le_bytes(
+            contents
+                .get(56..58)
+                .ok_or(Error::MalformedFile)?
+                .try_into()
+                .unwrap(),
+        ) as usize;
 
         // Parse PT_LOAD program headers.
         let mut phdrs = Vec::with_capacity(e_phnum);
@@ -135,30 +155,59 @@ impl Elf {
             let off = e_phoff + i * 56;
 
             // Get header type and skip non PT_LOAD headers.
-            let p_type =
-                u32::from_le_bytes(contents[off..off + 4].try_into().unwrap());
+            let p_type = u32::from_le_bytes(
+                contents
+                    .get(off..off + 4)
+                    .ok_or(Error::MalformedFile)?
+                    .try_into()
+                    .unwrap(),
+            );
             if p_type != 1 {
                 continue;
             }
 
             // Get the relevant fields of the program header.
             let p_flags = u32::from_le_bytes(
-                contents[off + 4..off + 8].try_into().unwrap(),
+                contents
+                    .get(off + 4..off + 8)
+                    .ok_or(Error::MalformedFile)?
+                    .try_into()
+                    .unwrap(),
             );
             let p_offset = usize::from_le_bytes(
-                contents[off + 8..off + 16].try_into().unwrap(),
+                contents
+                    .get(off + 8..off + 16)
+                    .ok_or(Error::MalformedFile)?
+                    .try_into()
+                    .unwrap(),
             );
             let p_vaddr = usize::from_le_bytes(
-                contents[off + 16..off + 24].try_into().unwrap(),
+                contents
+                    .get(off + 16..off + 24)
+                    .ok_or(Error::MalformedFile)?
+                    .try_into()
+                    .unwrap(),
             );
             let p_filesz = usize::from_le_bytes(
-                contents[off + 32..off + 40].try_into().unwrap(),
+                contents
+                    .get(off + 32..off + 40)
+                    .ok_or(Error::MalformedFile)?
+                    .try_into()
+                    .unwrap(),
             );
             let p_memsz = usize::from_le_bytes(
-                contents[off + 40..off + 48].try_into().unwrap(),
+                contents
+                    .get(off + 40..off + 48)
+                    .ok_or(Error::MalformedFile)?
+                    .try_into()
+                    .unwrap(),
             );
             let p_align = usize::from_le_bytes(
-                contents[off + 48..off + 56].try_into().unwrap(),
+                contents
+                    .get(off + 48..off + 56)
+                    .ok_or(Error::MalformedFile)?
+                    .try_into()
+                    .unwrap(),
             );
 
             // Convert flags to MMU permissions
