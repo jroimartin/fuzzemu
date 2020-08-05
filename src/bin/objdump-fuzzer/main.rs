@@ -323,7 +323,7 @@ impl Fuzzer {
             // the end of the file, so we return with error in that case.
             if new_cursor >= contents_len {
                 self.emu.set_reg(RegAlias::A0, !0)?;
-                return Ok(())
+                return Ok(());
             }
 
             input_file.cursor = new_cursor;
