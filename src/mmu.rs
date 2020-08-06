@@ -272,9 +272,7 @@ impl Mmu {
         // Check if the destination memory range is writable.
         self.check_perms(addr, size, Perm(PERM_WRITE))?;
 
-        let end = addr
-            .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
+        let end = *addr + size;
 
         // Update memory contents
         self.memory
@@ -315,13 +313,9 @@ impl Mmu {
         // Check if the source memory range is readable.
         self.check_perms(addr, size, perms)?;
 
-        let end = addr
-            .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
-
         let src = self
             .memory
-            .get(*addr..end)
+            .get(*addr..*addr + size)
             .ok_or(Error::InvalidAddress { addr, size })?;
 
         dst.copy_from_slice(src);
