@@ -341,7 +341,7 @@ impl Emulator {
     pub fn new(mmu: Mmu) -> Emulator {
         Emulator {
             regs: [0; 33],
-            mmu: mmu,
+            mmu,
         }
     }
 

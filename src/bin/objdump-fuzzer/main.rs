@@ -16,10 +16,10 @@ use riscv_emu::mmu::{
 const NCORES: usize = 1;
 
 /// Print debug messages.
-const DEBUG: bool = true;
+const DEBUG: bool = false;
 
 /// Print stdout/stderr output.
-const DEBUG_OUTPUT: bool = true;
+const DEBUG_OUTPUT: bool = false;
 
 /// Memory size of the VM.
 const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
@@ -34,10 +34,10 @@ const STACK_SIZE: usize = 1024 * 1024;
 const CHECK_RAW: bool = false;
 
 /// Fuzzer's exit reason.
+#[derive(Debug)]
 enum FuzzExit {
-    Error(String),
     ProgramExit(u64),
-    EcallError(u64),
+    SyscallError,
 
     MmuError(mmu::Error),
     VmExit(VmExit),
@@ -47,10 +47,7 @@ impl fmt::Display for FuzzExit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             FuzzExit::ProgramExit(code) => write!(f, "program exit: {}", code),
-            FuzzExit::Error(err) => write!(f, "fuzzer error: {}", err),
-            FuzzExit::EcallError(num) => {
-                write!(f, "error while executing ecall {}", num)
-            }
+            FuzzExit::SyscallError => write!(f, "syscall error"),
             FuzzExit::MmuError(err) => write!(f, "MMU error: {}", err),
             FuzzExit::VmExit(vmexit) => write!(f, "VM exit: {}", vmexit),
         }
@@ -158,60 +155,17 @@ impl Fuzzer {
             let mut local_stats = Stats::default();
 
             // Update global stats every 500M cycles.
-            let it = rdtsc();
-            while rdtsc() - it < 500_000_000 {
+            while rdtsc() - batch_start < 500_000_000 {
                 // Reset memory to the initial state before starting fuzzing.
                 let reset_start = rdtsc();
                 self.reset();
                 local_stats.reset_cycles += rdtsc() - reset_start;
 
-                // Run the target.
-                let fuzz_case_result = loop {
-                    let mut total_inst = 0;
+                // Run the target and handle the result.
+                let fcexit = self.run_fc(&mut local_stats);
+                self.handle_fcexit(fcexit, &mut local_stats);
 
-                    let vm_start = rdtsc();
-                    let run_result = self.emu.run(&mut total_inst);
-                    local_stats.vm_cycles += rdtsc() - vm_start;
-
-                    local_stats.total_inst += total_inst;
-
-                    match run_result {
-                        Err(VmExit::Ecall) => {
-                            let syscall_start = rdtsc();
-                            let syscall_result = self.syscall_dispatcher();
-                            local_stats.syscall_cycles +=
-                                rdtsc() - syscall_start;
-
-                            if let Err(err) = syscall_result {
-                                break err;
-                            } else {
-                                continue;
-                            }
-                        }
-                        Err(err) => break err.into(),
-                        _ => unreachable!(),
-                    }
-                };
-
-                // TODO(rm): Handle crashes as well as unexpected errors.
-                match fuzz_case_result {
-                    FuzzExit::VmExit(vmexit) => {
-                        if DEBUG {
-                            let pc = self.emu.reg(RegAlias::Pc).unwrap();
-                            eprintln!(
-                                "[{:#010x}] {}\n{}",
-                                pc, vmexit, self.emu
-                            );
-                        }
-
-                        if vmexit.is_crash() {
-                            local_stats.crashes += 1;
-                        }
-                    }
-                    err => todo!("unhandled error: {}", err),
-                }
-
-                todo!("stop here for now");
+                //todo!("stop here for now");
 
                 // Update local stats.
                 local_stats.fuzz_cases += 1;
@@ -231,6 +185,59 @@ impl Fuzzer {
         }
     }
 
+    /// Runs a single fuzz_case.
+    fn run_fc(&mut self, stats: &mut Stats) -> FuzzExit {
+        loop {
+            let mut total_inst = 0;
+
+            let vm_start = rdtsc();
+            let run_result = self.emu.run(&mut total_inst);
+            stats.vm_cycles += rdtsc() - vm_start;
+
+            stats.total_inst += total_inst;
+
+            match run_result {
+                Err(VmExit::Ecall) => {
+                    let syscall_start = rdtsc();
+                    let syscall_result = self.syscall_dispatcher();
+                    stats.syscall_cycles += rdtsc() - syscall_start;
+
+                    if let Err(err) = syscall_result {
+                        break err;
+                    } else {
+                        continue;
+                    }
+                }
+                Err(err) => break err.into(),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// Handle the results obtained by the fuzz case.
+    fn handle_fcexit(&mut self, fcexit: FuzzExit, stats: &mut Stats) {
+        // TODO(rm): Handle crashes as well as unexpected errors.
+
+        match fcexit {
+            FuzzExit::ProgramExit(code) => {
+                if DEBUG {
+                    eprintln!("program exited with {}", code);
+                }
+            }
+            FuzzExit::VmExit(vmexit) => {
+                if DEBUG {
+                    let pc = self.emu.reg(RegAlias::Pc).unwrap();
+                    eprintln!("[{:#010x}] {}\n{}", pc, vmexit, self.emu);
+                }
+
+                if vmexit.is_crash() {
+                    stats.crashes += 1;
+                }
+            }
+            err => todo!("unhandled error: {}", err),
+        }
+    }
+
     /// Restore the fuzzer to its initial state.
     fn reset(&mut self) {
         self.emu.reset(&self.emu_init);
@@ -244,32 +251,26 @@ impl Fuzzer {
         let syscall_number = self.emu.reg(RegAlias::A7)?;
         let pc = self.emu.reg(RegAlias::Pc)?;
 
-        let syscall_result = match syscall_number {
-            57 => self.syscall_close(),
-            62 => self.syscall_lseek(),
-            63 => self.syscall_read(),
-            64 => self.syscall_write(),
-            80 => self.syscall_fstat(),
-            93 => self.syscall_exit(),
-            214 => self.syscall_brk(),
-            1024 => self.syscall_open(),
-            1038 => self.syscall_stat(),
+        match syscall_number {
+            57 => self.syscall_close()?,
+            62 => self.syscall_lseek()?,
+            63 => self.syscall_read()?,
+            64 => self.syscall_write()?,
+            80 => self.syscall_fstat()?,
+            93 => self.syscall_exit()?,
+            214 => self.syscall_brk()?,
+            1024 => self.syscall_open()?,
+            1038 => self.syscall_stat()?,
             _ => todo!("[{:#010x}] unknown syscall", pc),
         };
 
-        if let Err(err) = syscall_result {
-            if DEBUG {
-                eprintln!("Syscall {} error: {}", syscall_number, err);
-            }
-            return Err(FuzzExit::EcallError(syscall_number));
-        }
-
+        // The syscall dispatcher is in charge of advancing PC.
         self.emu.set_reg(RegAlias::Pc, pc.wrapping_add(4))?;
 
         Ok(())
     }
 
-    /// close's syscall handle.
+    /// close syscall handle.
     fn syscall_close(&mut self) -> Result<(), FuzzExit> {
         let fd = self.emu.reg(RegAlias::A0)?;
 
@@ -288,7 +289,7 @@ impl Fuzzer {
         Ok(())
     }
 
-    /// lseek's syscall handle.
+    /// lseek syscall handle.
     fn syscall_lseek(&mut self) -> Result<(), FuzzExit> {
         const SEEK_SET: u64 = 0;
         const SEEK_CUR: u64 = 1;
@@ -318,11 +319,7 @@ impl Fuzzer {
                 SEEK_SET => offset as usize,
                 SEEK_CUR => input_file.cursor + offset as usize,
                 SEEK_END => (contents_len as i64 + offset as i64) as usize,
-                _ => {
-                    return Err(FuzzExit::Error(String::from(
-                        "invalid whence",
-                    )))
-                }
+                _ => return Err(FuzzExit::SyscallError),
             };
 
             // Although it should be possible, we do not support seeking beyond
@@ -341,7 +338,7 @@ impl Fuzzer {
         Ok(())
     }
 
-    /// read's syscall handle.
+    /// read syscall handle.
     fn syscall_read(&mut self) -> Result<(), FuzzExit> {
         let fd = self.emu.reg(RegAlias::A0)?;
         let buf = self.emu.reg(RegAlias::A1)?;
@@ -384,7 +381,7 @@ impl Fuzzer {
         Ok(())
     }
 
-    /// write's syscall handle.
+    /// write syscall handle.
     fn syscall_write(&mut self) -> Result<(), FuzzExit> {
         let fd = self.emu.reg(RegAlias::A0)?;
         let buf = self.emu.reg(RegAlias::A1)?;
@@ -413,7 +410,7 @@ impl Fuzzer {
         Ok(())
     }
 
-    /// fstat's syscall handle.
+    /// fstat syscall handle.
     fn syscall_fstat(&mut self) -> Result<(), FuzzExit> {
         // This is not a real implementation, but it's enough to bypass the
         // objdump checks. We just return with error.
@@ -428,7 +425,7 @@ impl Fuzzer {
         Ok(())
     }
 
-    /// exit's syscall handle.
+    /// exit syscall handle.
     fn syscall_exit(&mut self) -> Result<(), FuzzExit> {
         let code = self.emu.reg(RegAlias::A0)?;
 
@@ -439,7 +436,7 @@ impl Fuzzer {
         Err(FuzzExit::ProgramExit(code))
     }
 
-    /// brk's syscall handle.
+    /// brk syscall handle.
     fn syscall_brk(&mut self) -> Result<(), FuzzExit> {
         let addr = self.emu.reg(RegAlias::A0)? as usize;
 
@@ -477,7 +474,7 @@ impl Fuzzer {
         Ok(())
     }
 
-    /// open's syscall handle.
+    /// open syscall handle.
     fn syscall_open(&mut self) -> Result<(), FuzzExit> {
         // We only care about the path name, so we don't even consider the
         // other arguments.
@@ -511,7 +508,7 @@ impl Fuzzer {
         Ok(())
     }
 
-    /// stat's syscall handle.
+    /// stat syscall handle.
     fn syscall_stat(&mut self) -> Result<(), FuzzExit> {
         // This is not a real implementation, but it's enough to bypass the
         // objdump checks.
@@ -536,14 +533,14 @@ impl Fuzzer {
         // Set st_mode
         let st_mode_addr = statbuf
             .checked_add(16)
-            .ok_or(FuzzExit::Error(String::from("invalid statbuf address")))?;
+            .ok_or(FuzzExit::SyscallError)?;
         let st_mode_addr = VirtAddr(st_mode_addr as usize);
         self.emu.mmu_mut().write_int::<u32>(st_mode_addr, 0x8000)?;
 
         // Set st_size
         let st_size_addr = statbuf
             .checked_add(48)
-            .ok_or(FuzzExit::Error(String::from("invalid statbuf address")))?;
+            .ok_or(FuzzExit::SyscallError)?;
         let st_size_addr = VirtAddr(st_size_addr as usize);
         self.emu.mmu_mut().write_int::<u64>(st_size_addr, 0x1337)?;
 
@@ -592,7 +589,7 @@ impl Fuzzer {
         let new_brk_addr = self
             .brk_addr
             .checked_sub(size)
-            .ok_or(FuzzExit::Error(String::from("invalid free size")))?;
+            .ok_or(FuzzExit::SyscallError)?;
         let new_brk_addr = VirtAddr(new_brk_addr);
 
         self.emu.mmu_mut().set_perms(new_brk_addr, size, Perm(0))?;
