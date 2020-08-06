@@ -339,10 +339,7 @@ impl fmt::Display for Emulator {
 impl Emulator {
     /// Returns a new emulator, its memory is handled by the passed MMU.
     pub fn new(mmu: Mmu) -> Emulator {
-        Emulator {
-            regs: [0; 33],
-            mmu,
-        }
+        Emulator { regs: [0; 33], mmu }
     }
 
     /// Returns a reference to the internal MMU of the emulator.

@@ -13,7 +13,7 @@ use riscv_emu::mmu::{
 };
 
 /// Number of cores to use.
-const NCORES: usize = 1;
+const NCORES: usize = 8;
 
 /// Print debug messages.
 const DEBUG: bool = false;
@@ -531,16 +531,14 @@ impl Fuzzer {
         //   https://github.com/riscv/riscv-newlib/blob/f289cef6be67da67b2d97a47d6576fa7e6b4c858/libgloss/riscv/kernel_stat.h
 
         // Set st_mode
-        let st_mode_addr = statbuf
-            .checked_add(16)
-            .ok_or(FuzzExit::SyscallError)?;
+        let st_mode_addr =
+            statbuf.checked_add(16).ok_or(FuzzExit::SyscallError)?;
         let st_mode_addr = VirtAddr(st_mode_addr as usize);
         self.emu.mmu_mut().write_int::<u32>(st_mode_addr, 0x8000)?;
 
         // Set st_size
-        let st_size_addr = statbuf
-            .checked_add(48)
-            .ok_or(FuzzExit::SyscallError)?;
+        let st_size_addr =
+            statbuf.checked_add(48).ok_or(FuzzExit::SyscallError)?;
         let st_size_addr = VirtAddr(st_size_addr as usize);
         self.emu.mmu_mut().write_int::<u64>(st_size_addr, 0x1337)?;
 
