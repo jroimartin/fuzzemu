@@ -16,7 +16,7 @@ use riscv_emu::mmu::{
 const NCORES: usize = 1;
 
 /// Print debug messages.
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
 /// Print stdout/stderr output.
 const DEBUG_OUTPUT: bool = true;
@@ -29,7 +29,7 @@ const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
 /// value must be bigger than 1024.
 const STACK_SIZE: usize = 1024 * 1024;
 
-/// If true, allocate memory with permissions WRITE | RAW, so reads of
+/// If true, allocate memory with permissions WRITE|RAW, so reads of
 /// unitialized memory are detected.
 const CHECK_RAW: bool = false;
 
@@ -395,19 +395,20 @@ impl Fuzzer {
         }
 
         // We only support writing to stdout and stderr.
-        if fd == 1 || fd == 2 {
-            if DEBUG_OUTPUT {
-                let mut bytes = vec![0; count as usize];
-                self.emu.mmu().read(VirtAddr(buf as usize), &mut bytes)?;
-                let buf = String::from_utf8(bytes)
-                    .unwrap_or_else(|_| String::from("(invalid string)"));
-                eprint!("{}", buf);
-            }
-
-            self.emu.set_reg(RegAlias::A0, count)?;
-        } else {
+        if fd != 1 && fd != 2 {
             self.emu.set_reg(RegAlias::A0, !0)?;
+            return Ok(());
         }
+
+        if DEBUG_OUTPUT {
+            let mut bytes = vec![0; count as usize];
+            self.emu.mmu().read(VirtAddr(buf as usize), &mut bytes)?;
+            let buf = String::from_utf8(bytes)
+                .unwrap_or_else(|_| String::from("(invalid string)"));
+            eprint!("{}", buf);
+        }
+
+        self.emu.set_reg(RegAlias::A0, count)?;
 
         Ok(())
     }
@@ -440,7 +441,7 @@ impl Fuzzer {
 
     /// brk's syscall handle.
     fn syscall_brk(&mut self) -> Result<(), FuzzExit> {
-        let addr = self.emu.reg(RegAlias::A0)?;
+        let addr = self.emu.reg(RegAlias::A0)? as usize;
 
         if DEBUG {
             eprintln!(
@@ -449,21 +450,28 @@ impl Fuzzer {
             );
         }
 
+        // If address is zero, brk returns the current brk address.
         if addr == 0 {
             self.emu.set_reg(RegAlias::A0, *self.brk_addr as u64)?;
-        } else {
-            let increment = addr
-                .checked_sub(*self.brk_addr as u64)
-                .ok_or(FuzzExit::Error(String::from("invalid increment")))?;
+            return Ok(());
+        }
 
+        // We don't case about the returned values. On success, brk returns the
+        // requested address, which is already in A0.
+        if addr >= *self.brk_addr {
+            // Allocate
+            let size = addr - *self.brk_addr;
             if DEBUG {
-                eprintln!("brk: increment={:#010x}", increment);
+                eprintln!("brk: allocate({:#x})", size);
             }
-
-            // After calling sbrk(), the returned value is discarded.
-            // On success, brk returns the requested address, which is
-            // already in A0.
-            self.sbrk(increment as usize)?;
+            self.allocate(size)?;
+        } else {
+            // Free
+            let size = *self.brk_addr - addr;
+            if DEBUG {
+                eprintln!("brk: free({:#x})", size);
+            }
+            self.free(size)?;
         }
 
         Ok(())
@@ -483,21 +491,22 @@ impl Fuzzer {
         }
 
         // We only allow to open the input file, which fd is always 1337. If
-        // the path does not correspond to the expected input file, then return
-        // error.
-        if path_name == "input_file" && self.input_file.is_none() {
-            let input_file = InputFile {
-                cursor: 0,
-                contents: include_bytes!(
-                    "../../../testdata/binutils/objdump-riscv"
-                ),
-            };
-
-            self.input_file = Some(input_file);
-            self.emu.set_reg(RegAlias::A0, 1337)?;
-        } else {
+        // the path does not correspond to the expected input file, or the file
+        // is already open, then return error.
+        if path_name != "input_file" || self.input_file.is_some() {
             self.emu.set_reg(RegAlias::A0, !0)?;
+            return Ok(());
         }
+
+        let input_file = InputFile {
+            cursor: 0,
+            contents: include_bytes!(
+                "../../../testdata/binutils/objdump-riscv"
+            ),
+        };
+
+        self.input_file = Some(input_file);
+        self.emu.set_reg(RegAlias::A0, 1337)?;
 
         Ok(())
     }
@@ -543,12 +552,16 @@ impl Fuzzer {
         Ok(())
     }
 
-    /// Increments the program's data space by `increment` bytes. Calling this
-    /// function with an increment of 0 can be used to find the current
-    /// location of the program break. The program break defines the end of the
-    /// process's data segment
-    fn sbrk(&mut self, increment: usize) -> Result<VirtAddr, FuzzExit> {
-        if increment == 0 {
+    /// Allocates new memory. Allocation is done by incrementing the program's
+    /// data space by `size` bytes. This function returns the previous brk
+    /// address.
+    ///
+    /// If CHECK_RAW is true, the new memory has the permissions RAW|WRITE, so
+    /// it's possible to detects reads to unitialized memory. On the other
+    /// hand, if CHECK_RAW is false, the new memory has the permissions
+    /// READ|WRITE.
+    fn allocate(&mut self, size: usize) -> Result<VirtAddr, FuzzExit> {
+        if size == 0 {
             return Ok(self.brk_addr);
         }
 
@@ -558,19 +571,35 @@ impl Fuzzer {
             Perm(PERM_READ | PERM_WRITE)
         };
 
-        self.emu.mmu_mut().set_perms(
-            self.brk_addr,
-            increment,
-            perms,
-        )?;
+        self.emu.mmu_mut().set_perms(self.brk_addr, size, perms)?;
 
         let prev_brk_addr = self.brk_addr;
 
         // checked_add() is not needed here because this has been already
         // checked in the previous call to set_perms().
-        self.brk_addr = VirtAddr(*prev_brk_addr + increment);
+        self.brk_addr = VirtAddr(*prev_brk_addr + size);
 
         Ok(prev_brk_addr)
+    }
+
+    /// Deallocate memory. This is done by decreasing the program's data space
+    /// by `size` bytes and removing all the perissions of the freed region.
+    fn free(&mut self, size: usize) -> Result<(), FuzzExit> {
+        if size == 0 {
+            return Ok(());
+        }
+
+        let new_brk_addr = self
+            .brk_addr
+            .checked_sub(size)
+            .ok_or(FuzzExit::Error(String::from("invalid free size")))?;
+        let new_brk_addr = VirtAddr(new_brk_addr);
+
+        self.emu.mmu_mut().set_perms(new_brk_addr, size, Perm(0))?;
+
+        self.brk_addr = new_brk_addr;
+
+        Ok(())
     }
 
     /// Reads a C string (NULL terminated) from memory at `addr`.
