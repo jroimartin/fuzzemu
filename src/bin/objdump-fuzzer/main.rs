@@ -16,7 +16,7 @@ use riscv_emu::mmu::{
 const NCORES: usize = 1;
 
 /// Print debug messages.
-const DEBUG: bool = true;
+const DEBUG: bool = false;
 
 /// Print stdout/stderr output.
 const DEBUG_OUTPUT: bool = true;
@@ -28,6 +28,10 @@ const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
 /// that 1024 bytes will be reserved to store the program arguments, so this
 /// value must be bigger than 1024.
 const STACK_SIZE: usize = 1024 * 1024;
+
+/// If true, allocate memory with permissions WRITE | RAW, so reads of
+/// unitialized memory are detected.
+const CHECK_RAW: bool = false;
 
 /// Fuzzer's exit reason.
 enum FuzzExit {
@@ -548,12 +552,16 @@ impl Fuzzer {
             return Ok(self.brk_addr);
         }
 
-        // Initialize the new allocated memory as read-after-write, so it's
-        // possible to detect accesses to unitialized memory.
+        let perms = if CHECK_RAW {
+            Perm(PERM_RAW | PERM_WRITE)
+        } else {
+            Perm(PERM_READ | PERM_WRITE)
+        };
+
         self.emu.mmu_mut().set_perms(
             self.brk_addr,
             increment,
-            Perm(PERM_RAW | PERM_WRITE),
+            perms,
         )?;
 
         let prev_brk_addr = self.brk_addr;
