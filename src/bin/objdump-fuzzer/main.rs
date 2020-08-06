@@ -8,7 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use riscv_emu::emulator::{Emulator, RegAlias, VmExit};
-use riscv_emu::mmu::{self, Perm, VirtAddr, PERM_RAW, PERM_READ, PERM_WRITE};
+use riscv_emu::mmu::{
+    self, Mmu, Perm, VirtAddr, PERM_RAW, PERM_READ, PERM_WRITE,
+};
 
 /// Number of cores to use.
 const NCORES: usize = 1;
@@ -17,7 +19,7 @@ const NCORES: usize = 1;
 const DEBUG: bool = true;
 
 /// Print stdout/stderr output.
-const DEBUG_OUTPUT: bool = false;
+const DEBUG_OUTPUT: bool = true;
 
 /// Memory size of the VM.
 const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
@@ -191,7 +193,7 @@ impl Fuzzer {
                 match fuzz_case_result {
                     FuzzExit::VmExit(vmexit) => {
                         if DEBUG {
-                            let pc = self.emu.get_reg(RegAlias::Pc).unwrap();
+                            let pc = self.emu.reg(RegAlias::Pc).unwrap();
                             eprintln!(
                                 "[{:#010x}] {}\n{}",
                                 pc, vmexit, self.emu
@@ -235,8 +237,8 @@ impl Fuzzer {
     /// Dispatches syscalls when the emulator exits with `VmExit::Ecall`,
     /// redirecting the execution to the relevant syscall handler.
     fn syscall_dispatcher(&mut self) -> Result<(), FuzzExit> {
-        let syscall_number = self.emu.get_reg(RegAlias::A7)?;
-        let pc = self.emu.get_reg(RegAlias::Pc)?;
+        let syscall_number = self.emu.reg(RegAlias::A7)?;
+        let pc = self.emu.reg(RegAlias::Pc)?;
 
         let syscall_result = match syscall_number {
             57 => self.syscall_close(),
@@ -265,7 +267,7 @@ impl Fuzzer {
 
     /// close's syscall handle.
     fn syscall_close(&mut self) -> Result<(), FuzzExit> {
-        let fd = self.emu.get_reg(RegAlias::A0)?;
+        let fd = self.emu.reg(RegAlias::A0)?;
 
         if DEBUG {
             eprintln!("close: fd={}", fd);
@@ -288,9 +290,9 @@ impl Fuzzer {
         const SEEK_CUR: u64 = 1;
         const SEEK_END: u64 = 2;
 
-        let fd = self.emu.get_reg(RegAlias::A0)?;
-        let offset = self.emu.get_reg(RegAlias::A1)?;
-        let whence = self.emu.get_reg(RegAlias::A2)?;
+        let fd = self.emu.reg(RegAlias::A0)?;
+        let offset = self.emu.reg(RegAlias::A1)?;
+        let whence = self.emu.reg(RegAlias::A2)?;
 
         if DEBUG {
             eprintln!("lseek: fd={} offset={} whence={}", fd, offset, whence);
@@ -337,9 +339,9 @@ impl Fuzzer {
 
     /// read's syscall handle.
     fn syscall_read(&mut self) -> Result<(), FuzzExit> {
-        let fd = self.emu.get_reg(RegAlias::A0)?;
-        let buf = self.emu.get_reg(RegAlias::A1)?;
-        let count = self.emu.get_reg(RegAlias::A2)? as usize;
+        let fd = self.emu.reg(RegAlias::A0)?;
+        let buf = self.emu.reg(RegAlias::A1)?;
+        let count = self.emu.reg(RegAlias::A2)? as usize;
 
         let buf = VirtAddr(buf as usize);
 
@@ -363,10 +365,10 @@ impl Fuzzer {
             // count cannot be bigger than the number of remaining bytes.
             let count = cmp::min(count, remaining);
 
-            // checked_add is not needed here because is cursor is already
+            // checked_add is not needed here because the cursor is already
             // sanitized by the lseek handler.
             self.emu
-                .mmu
+                .mmu_mut()
                 .write(buf, &input_file.contents[cursor..cursor + count])?;
 
             input_file.cursor += count as usize;
@@ -380,9 +382,9 @@ impl Fuzzer {
 
     /// write's syscall handle.
     fn syscall_write(&mut self) -> Result<(), FuzzExit> {
-        let fd = self.emu.get_reg(RegAlias::A0)?;
-        let buf = self.emu.get_reg(RegAlias::A1)?;
-        let count = self.emu.get_reg(RegAlias::A2)?;
+        let fd = self.emu.reg(RegAlias::A0)?;
+        let buf = self.emu.reg(RegAlias::A1)?;
+        let count = self.emu.reg(RegAlias::A2)?;
 
         if DEBUG {
             eprintln!("write: fd={} count={}", fd, count);
@@ -392,7 +394,7 @@ impl Fuzzer {
         if fd == 1 || fd == 2 {
             if DEBUG_OUTPUT {
                 let mut bytes = vec![0; count as usize];
-                self.emu.mmu.read(VirtAddr(buf as usize), &mut bytes)?;
+                self.emu.mmu().read(VirtAddr(buf as usize), &mut bytes)?;
                 let buf = String::from_utf8(bytes)
                     .unwrap_or_else(|_| String::from("(invalid string)"));
                 eprint!("{}", buf);
@@ -410,7 +412,7 @@ impl Fuzzer {
     fn syscall_fstat(&mut self) -> Result<(), FuzzExit> {
         // This is not a real implementation, but it's enough to bypass the
         // objdump checks. We just return with error.
-        let fd = self.emu.get_reg(RegAlias::A0)?;
+        let fd = self.emu.reg(RegAlias::A0)?;
 
         if DEBUG {
             eprintln!("fstat: fd={}", fd);
@@ -423,10 +425,10 @@ impl Fuzzer {
 
     /// exit's syscall handle.
     fn syscall_exit(&mut self) -> Result<(), FuzzExit> {
-        let code = self.emu.get_reg(RegAlias::A0)?;
+        let code = self.emu.reg(RegAlias::A0)?;
 
         if DEBUG {
-            eprintln!("exit: {}", code);
+            eprintln!("exit: code={}", code);
         }
 
         Err(FuzzExit::ProgramExit(code))
@@ -434,11 +436,11 @@ impl Fuzzer {
 
     /// brk's syscall handle.
     fn syscall_brk(&mut self) -> Result<(), FuzzExit> {
-        let addr = self.emu.get_reg(RegAlias::A0)?;
+        let addr = self.emu.reg(RegAlias::A0)?;
 
         if DEBUG {
-            println!(
-                "brk: addr={:#010x} self.brk_addr={}",
+            eprintln!(
+                "brk: addr={:#010x} (previous addr={})",
                 addr, self.brk_addr
             );
         }
@@ -451,7 +453,7 @@ impl Fuzzer {
                 .ok_or(FuzzExit::Error(String::from("invalid increment")))?;
 
             if DEBUG {
-                println!("brk: increment={:#010x}", increment);
+                eprintln!("brk: increment={:#010x}", increment);
             }
 
             // After calling sbrk(), the returned value is discarded.
@@ -467,7 +469,7 @@ impl Fuzzer {
     fn syscall_open(&mut self) -> Result<(), FuzzExit> {
         // We only care about the path name, so we don't even consider the
         // other arguments.
-        let path_name = self.emu.get_reg(RegAlias::A0)?;
+        let path_name = self.emu.reg(RegAlias::A0)?;
 
         let path_name = self.get_cstr(VirtAddr(path_name as usize))?;
         let path_name = String::from_utf8_lossy(&path_name);
@@ -500,8 +502,8 @@ impl Fuzzer {
     fn syscall_stat(&mut self) -> Result<(), FuzzExit> {
         // This is not a real implementation, but it's enough to bypass the
         // objdump checks.
-        let path_name = self.emu.get_reg(RegAlias::A0)?;
-        let statbuf = self.emu.get_reg(RegAlias::A1)?;
+        let path_name = self.emu.reg(RegAlias::A0)?;
+        let statbuf = self.emu.reg(RegAlias::A1)?;
 
         let path_name = self.get_cstr(VirtAddr(path_name as usize))?;
         let path_name = String::from_utf8_lossy(&path_name);
@@ -523,14 +525,14 @@ impl Fuzzer {
             .checked_add(16)
             .ok_or(FuzzExit::Error(String::from("invalid statbuf address")))?;
         let st_mode_addr = VirtAddr(st_mode_addr as usize);
-        self.emu.mmu.write_int::<u32>(st_mode_addr, 0x8000)?;
+        self.emu.mmu_mut().write_int::<u32>(st_mode_addr, 0x8000)?;
 
         // Set st_size
         let st_size_addr = statbuf
             .checked_add(48)
             .ok_or(FuzzExit::Error(String::from("invalid statbuf address")))?;
         let st_size_addr = VirtAddr(st_size_addr as usize);
-        self.emu.mmu.write_int::<u64>(st_size_addr, 0x1337)?;
+        self.emu.mmu_mut().write_int::<u64>(st_size_addr, 0x1337)?;
 
         self.emu.set_reg(RegAlias::A0, 0)?;
 
@@ -548,7 +550,7 @@ impl Fuzzer {
 
         // Initialize the new allocated memory as read-after-write, so it's
         // possible to detect accesses to unitialized memory.
-        self.emu.mmu.set_perms(
+        self.emu.mmu_mut().set_perms(
             self.brk_addr,
             increment,
             Perm(PERM_RAW | PERM_WRITE),
@@ -568,7 +570,7 @@ impl Fuzzer {
         let mut result = Vec::new();
         let mut curaddr = addr;
         loop {
-            let ch = self.emu.mmu.read_int::<u8>(curaddr)?;
+            let ch = self.emu.mmu().read_int::<u8>(curaddr)?;
             if ch == 0 {
                 break Ok(result);
             }
@@ -591,7 +593,7 @@ impl Fuzzer {
 /// This function will panic if the memory size of the VM is not higher than
 /// `STACK_SIZE`.
 fn setup_stack(emu: &mut Emulator) -> Result<(), FuzzExit> {
-    let mem_size = emu.mmu.size();
+    let mem_size = emu.mmu().size();
 
     assert!(mem_size > STACK_SIZE, "the VM memory is not big enough");
 
@@ -599,26 +601,27 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), FuzzExit> {
     let stack_init: usize = mem_size - 1024;
 
     // Set the permissions of the stack to RW.
-    emu.mmu.set_perms(
+    emu.mmu_mut().set_perms(
         VirtAddr(mem_size - STACK_SIZE),
         STACK_SIZE,
         Perm(PERM_READ | PERM_WRITE),
     )?;
 
     // Store program args
-    emu.mmu.poke(VirtAddr(argv_base), b"objdump\x00")?;
-    emu.mmu.poke(VirtAddr(argv_base + 32), b"-x\x00")?;
-    emu.mmu.poke(VirtAddr(argv_base + 64), b"input_file\x00")?;
+    emu.mmu_mut().poke(VirtAddr(argv_base), b"objdump\x00")?;
+    emu.mmu_mut().poke(VirtAddr(argv_base + 32), b"-x\x00")?;
+    emu.mmu_mut()
+        .poke(VirtAddr(argv_base + 64), b"input_file\x00")?;
 
     // Store argc
-    emu.mmu.poke_int::<u64>(VirtAddr(stack_init), 3)?;
+    emu.mmu_mut().poke_int::<u64>(VirtAddr(stack_init), 3)?;
 
     // Store pointers to program args
-    emu.mmu
+    emu.mmu_mut()
         .poke_int::<u64>(VirtAddr(stack_init + 8), argv_base as u64)?;
-    emu.mmu
+    emu.mmu_mut()
         .poke_int::<u64>(VirtAddr(stack_init + 16), argv_base as u64 + 32)?;
-    emu.mmu
+    emu.mmu_mut()
         .poke_int::<u64>(VirtAddr(stack_init + 24), argv_base as u64 + 64)?;
 
     // Set SP
@@ -628,7 +631,8 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), FuzzExit> {
 }
 
 fn main() {
-    let mut emu_init = Emulator::new(VM_MEM_SIZE);
+    let mmu = Mmu::new(VM_MEM_SIZE);
+    let mut emu_init = Emulator::new(mmu);
 
     // Load the program file.
     let brk_addr = emu_init

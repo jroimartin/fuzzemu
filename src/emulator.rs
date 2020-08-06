@@ -98,17 +98,19 @@ impl Deref for Reg {
 ///
 /// # Examples
 ///
-/// All the following calls to `get_reg` are equivalent:
+/// All the following calls to `reg` are equivalent:
 ///
 /// ```
 /// use riscv_emu::emulator::{Emulator, Reg, RegAlias};
+/// use riscv_emu::mmu::Mmu;
 ///
-/// let mut emulator = Emulator::new(1024);
+/// let mmu = Mmu::new(1024);
+/// let mut emulator = Emulator::new(mmu);
 ///
-/// emulator.get_reg(RegAlias::Zero);
-/// emulator.get_reg(Reg::from(RegAlias::Zero));
-/// emulator.get_reg(Reg(RegAlias::Zero as u32));
-/// emulator.get_reg(Reg(0));
+/// emulator.reg(RegAlias::Zero);
+/// emulator.reg(Reg::from(RegAlias::Zero));
+/// emulator.reg(Reg(RegAlias::Zero as u32));
+/// emulator.reg(Reg(0));
 /// ```
 ///
 /// For obvious reasons, the first option is recommended.
@@ -309,7 +311,7 @@ pub struct Emulator {
     regs: [u64; 33],
 
     /// MMU used by the emulator for memory operations.
-    pub mmu: Mmu,
+    mmu: Mmu,
 }
 
 impl fmt::Display for Emulator {
@@ -335,12 +337,22 @@ impl fmt::Display for Emulator {
 }
 
 impl Emulator {
-    /// Returns a new emulator with a memory of size `mem_size`.
-    pub fn new(mem_size: usize) -> Emulator {
+    /// Returns a new emulator, its memory is handled by the passed MMU.
+    pub fn new(mmu: Mmu) -> Emulator {
         Emulator {
             regs: [0; 33],
-            mmu: Mmu::new(mem_size),
+            mmu: mmu,
         }
+    }
+
+    /// Returns a reference to the internal MMU of the emulator.
+    pub fn mmu(&self) -> &Mmu {
+        &self.mmu
+    }
+
+    /// Returns a mutable reference to the internal MMU of the emulator.
+    pub fn mmu_mut(&mut self) -> &mut Mmu {
+        &mut self.mmu
     }
 
     /// Loads an ELF program in the emulator. It also points the program
@@ -418,7 +430,7 @@ impl Emulator {
     }
 
     /// Returns the value stored in the register `reg`.
-    pub fn get_reg<T: Into<Reg>>(&self, reg: T) -> Result<u64, VmExit> {
+    pub fn reg<T: Into<Reg>>(&self, reg: T) -> Result<u64, VmExit> {
         let reg = *reg.into() as usize;
 
         if reg >= self.regs.len() {
@@ -439,7 +451,7 @@ impl Emulator {
         *inst_execed = 0;
 
         loop {
-            let pc = self.get_reg(RegAlias::Pc)?;
+            let pc = self.reg(RegAlias::Pc)?;
 
             let inst = self.mmu.read_int_with_perms::<u32>(
                 VirtAddr(pc as usize),
@@ -457,7 +469,7 @@ impl Emulator {
     fn run_instruction(&mut self, inst: u32) -> Result<(), VmExit> {
         let opcode = inst & 0b111_1111;
 
-        let pc = self.get_reg(RegAlias::Pc)?;
+        let pc = self.reg(RegAlias::Pc)?;
 
         if pc & 3 != 0 {
             return Err(VmExit::AddressMisaligned);
@@ -496,7 +508,7 @@ impl Emulator {
                 let dec = Itype::from(inst);
 
                 let offset = dec.imm as u64;
-                let rs1 = self.get_reg(dec.rs1)?;
+                let rs1 = self.reg(dec.rs1)?;
 
                 match dec.funct3 {
                     0b000 => {
@@ -515,8 +527,8 @@ impl Emulator {
                 let dec = Btype::from(inst);
 
                 let offset = dec.imm as u64;
-                let rs1 = self.get_reg(dec.rs1)?;
-                let rs2 = self.get_reg(dec.rs2)?;
+                let rs1 = self.reg(dec.rs1)?;
+                let rs2 = self.reg(dec.rs2)?;
 
                 match dec.funct3 {
                     0b000 => {
@@ -585,7 +597,7 @@ impl Emulator {
             0b0000011 => {
                 let dec = Itype::from(inst);
 
-                let rs1 = self.get_reg(dec.rs1)?;
+                let rs1 = self.reg(dec.rs1)?;
                 let offset = dec.imm as u64;
                 let vaddr = rs1.wrapping_add(offset);
 
@@ -633,8 +645,8 @@ impl Emulator {
             0b0100011 => {
                 let dec = Stype::from(inst);
 
-                let rs1 = self.get_reg(dec.rs1)?;
-                let rs2 = self.get_reg(dec.rs2)?;
+                let rs1 = self.reg(dec.rs1)?;
+                let rs2 = self.reg(dec.rs2)?;
                 let offset = dec.imm as u64;
                 let vaddr = rs1.wrapping_add(offset);
 
@@ -664,7 +676,7 @@ impl Emulator {
                 let dec = Itype::from(inst);
 
                 let imm = dec.imm as u64;
-                let rs1 = self.get_reg(dec.rs1)?;
+                let rs1 = self.reg(dec.rs1)?;
 
                 match dec.funct3 {
                     0b000 => {
@@ -731,8 +743,8 @@ impl Emulator {
             0b0110011 => {
                 let dec = Rtype::from(inst);
 
-                let rs1 = self.get_reg(dec.rs1)?;
-                let rs2 = self.get_reg(dec.rs2)?;
+                let rs1 = self.reg(dec.rs1)?;
+                let rs2 = self.reg(dec.rs2)?;
 
                 match dec.funct3 {
                     0b000 => {
@@ -855,7 +867,7 @@ impl Emulator {
                 let dec = Itype::from(inst);
 
                 let imm = dec.imm as u32;
-                let rs1 = self.get_reg(dec.rs1)? as u32;
+                let rs1 = self.reg(dec.rs1)? as u32;
 
                 match dec.funct3 {
                     0b000 => {
@@ -898,8 +910,8 @@ impl Emulator {
             0b0111011 => {
                 let dec = Rtype::from(inst);
 
-                let rs1 = self.get_reg(dec.rs1)? as u32;
-                let rs2 = self.get_reg(dec.rs2)? as u32;
+                let rs1 = self.reg(dec.rs1)? as u32;
+                let rs2 = self.reg(dec.rs2)? as u32;
 
                 match dec.funct3 {
                     0b000 => {
