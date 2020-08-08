@@ -13,13 +13,13 @@ use riscv_emu::mmu::{
 };
 
 /// If `true`, print debug messages.
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
 /// If `true`, run one fuzz case using one thread and panic afterwards.
-const DEBUG_ONE: bool = false;
+const DEBUG_ONE: bool = true;
 
 /// If `true`, print stdout/stderr output.
-const DEBUG_OUTPUT: bool = false;
+const DEBUG_OUTPUT: bool = true;
 
 /// Number of threads to spawn.
 const NUM_THREADS: usize = 8;
@@ -35,6 +35,9 @@ const STACK_SIZE: usize = 1024 * 1024;
 /// If `true`, allocate memory with permissions WRITE|RAW, so reads of
 /// unitialized memory are detected.
 const CHECK_RAW: bool = false;
+
+/// If `true`, execute the target program using JIT compilation.
+const USE_JIT: bool = true;
 
 /// Fuzzer's exit reason.
 #[derive(Debug)]
@@ -668,6 +671,10 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), FuzzExit> {
 fn main() {
     let mmu = Mmu::new(VM_MEM_SIZE);
     let mut emu_init = Emulator::new(mmu);
+
+    if USE_JIT {
+        emu_init = emu_init.enable_jit();
+    }
 
     // Load the program file.
     let brk_addr = emu_init

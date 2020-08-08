@@ -312,6 +312,9 @@ pub struct Emulator {
 
     /// MMU used by the emulator for memory operations.
     mmu: Mmu,
+
+    /// If `true`, execute code using JIT compilation.
+    jit_mode: bool,
 }
 
 impl fmt::Display for Emulator {
@@ -339,7 +342,11 @@ impl fmt::Display for Emulator {
 impl Emulator {
     /// Returns a new emulator, its memory is handled by the passed MMU.
     pub fn new(mmu: Mmu) -> Emulator {
-        Emulator { regs: [0; 33], mmu }
+        Emulator {
+            regs: [0; 33],
+            mmu,
+            jit_mode: false,
+        }
     }
 
     /// Returns a reference to the internal MMU of the emulator.
@@ -350,6 +357,12 @@ impl Emulator {
     /// Returns a mutable reference to the internal MMU of the emulator.
     pub fn mmu_mut(&mut self) -> &mut Mmu {
         &mut self.mmu
+    }
+
+    /// Enable JIT compilation.
+    pub fn enable_jit(mut self) -> Emulator {
+        self.jit_mode = true;
+        self
     }
 
     /// Loads an ELF program in the emulator. It also points the program
@@ -398,6 +411,7 @@ impl Emulator {
         Emulator {
             regs: self.regs,
             mmu: self.mmu.fork(),
+            jit_mode: self.jit_mode,
         }
     }
 
@@ -405,6 +419,7 @@ impl Emulator {
     pub fn reset(&mut self, other: &Emulator) {
         self.regs = other.regs;
         self.mmu.reset(&other.mmu);
+        self.jit_mode = other.jit_mode;
     }
 
     /// Sets the value of the register `reg` to `val`.
@@ -442,9 +457,18 @@ impl Emulator {
         }
     }
 
-    /// Emulates until vm exit or error. In returns the number of executed
+    /// Run until vm exit or error. In returns the number of executed
     /// instructions in `inst_execed`.
     pub fn run(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
+        if self.jit_mode {
+            self.run_jit(inst_execed)
+        } else {
+            self.run_emu(inst_execed)
+        }
+    }
+
+    /// Run code using pure emulation.
+    fn run_emu(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
         *inst_execed = 0;
 
         loop {
@@ -457,13 +481,13 @@ impl Emulator {
 
             *inst_execed += 1;
 
-            self.run_instruction(inst)?;
+            self.emulate_instruction(inst)?;
         }
     }
 
     /// Emulates a single instruction, updating the internal state of the
     /// emulator.
-    fn run_instruction(&mut self, inst: u32) -> Result<(), VmExit> {
+    fn emulate_instruction(&mut self, inst: u32) -> Result<(), VmExit> {
         let opcode = inst & 0b111_1111;
 
         let pc = self.reg(RegAlias::Pc)?;
@@ -965,5 +989,10 @@ impl Emulator {
         self.set_reg(RegAlias::Pc, pc.wrapping_add(4))?;
 
         Ok(())
+    }
+
+    /// Run code using JIT compilation.
+    fn run_jit(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
+        todo!("JIT")
     }
 }
