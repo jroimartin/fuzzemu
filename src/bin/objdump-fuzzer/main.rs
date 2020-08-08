@@ -497,9 +497,7 @@ impl Fuzzer {
 
         let input_file = InputFile {
             cursor: 0,
-            contents: include_bytes!(
-                "../../../testdata/binutils/objdump-riscv"
-            ),
+            contents: include_bytes!("../../../testdata/xauth"),
         };
 
         self.input_file = Some(input_file);
@@ -698,7 +696,7 @@ fn main() {
 
     // Show statistics in the main thread.
     loop {
-        thread::sleep(Duration::from_secs(1));
+        thread::sleep(Duration::from_millis(1000));
 
         let stats = stats.lock().unwrap();
 
