@@ -12,14 +12,17 @@ use riscv_emu::mmu::{
     self, Mmu, Perm, VirtAddr, PERM_RAW, PERM_READ, PERM_WRITE,
 };
 
-/// Number of cores to use.
-const NCORES: usize = 8;
-
-/// Print debug messages.
+/// If `true`, print debug messages.
 const DEBUG: bool = false;
 
-/// Print stdout/stderr output.
+/// If `true`, run one fuzz case using one thread and panic afterwards.
+const DEBUG_ONE: bool = false;
+
+/// If `true`, print stdout/stderr output.
 const DEBUG_OUTPUT: bool = false;
+
+/// Number of cores to use.
+const NCORES: usize = 8;
 
 /// Memory size of the VM.
 const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
@@ -29,7 +32,7 @@ const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
 /// value must be bigger than 1024.
 const STACK_SIZE: usize = 1024 * 1024;
 
-/// If true, allocate memory with permissions WRITE|RAW, so reads of
+/// If `true`, allocate memory with permissions WRITE|RAW, so reads of
 /// unitialized memory are detected.
 const CHECK_RAW: bool = false;
 
@@ -165,7 +168,9 @@ impl Fuzzer {
                 let fcexit = self.run_fc(&mut local_stats);
                 self.handle_fcexit(fcexit, &mut local_stats);
 
-                //todo!("stop here for now");
+                if DEBUG_ONE {
+                    panic!("DEBUG_ONE is enabled");
+                }
 
                 // Update local stats.
                 local_stats.fuzz_cases += 1;
@@ -688,7 +693,9 @@ fn main() {
     let start = Instant::now();
 
     // Start one worker per thread.
-    for _ in 0..NCORES {
+    let ncores = if DEBUG_ONE { 1 } else { NCORES };
+
+    for _ in 0..ncores {
         let mut fuzzer =
             Fuzzer::new(Arc::clone(&emu_init), brk_addr, Arc::clone(&stats));
         thread::spawn(move || fuzzer.go());
