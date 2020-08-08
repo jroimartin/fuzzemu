@@ -21,8 +21,8 @@ const DEBUG_ONE: bool = false;
 /// If `true`, print stdout/stderr output.
 const DEBUG_OUTPUT: bool = false;
 
-/// Number of cores to use.
-const NCORES: usize = 8;
+/// Number of threads to spawn.
+const NUM_THREADS: usize = 8;
 
 /// Memory size of the VM.
 const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
@@ -693,21 +693,23 @@ fn main() {
     let start = Instant::now();
 
     // Start one worker per thread.
-    let ncores = if DEBUG_ONE { 1 } else { NCORES };
+    let num_threads = if DEBUG_ONE { 1 } else { NUM_THREADS };
 
-    for _ in 0..ncores {
+    for _ in 0..num_threads {
         let mut fuzzer =
             Fuzzer::new(Arc::clone(&emu_init), brk_addr, Arc::clone(&stats));
         thread::spawn(move || fuzzer.go());
     }
 
     // Show statistics in the main thread.
+    let mut last_fuzz_cases = 0;
     loop {
         thread::sleep(Duration::from_millis(1000));
 
         let stats = stats.lock().unwrap();
 
         let elapsed = start.elapsed().as_secs_f64();
+        let fcps_last = stats.fuzz_cases - last_fuzz_cases;
         let fcps = stats.fuzz_cases as f64 / elapsed;
         let instps = stats.total_inst as f64 / elapsed;
         let vm_time = stats.vm_cycles as f64 / stats.total_cycles as f64;
@@ -716,10 +718,12 @@ fn main() {
             stats.syscall_cycles as f64 / stats.total_cycles as f64;
 
         println!(
-            "[{:10.4}] cases {:10} | {:10.1} fcps | {:10.1} inst/s | \
-            crashes {:5} | vm {:6.4} | reset {:6.4} | syscall {:6.4}",
+            "[{:10.4}] cases {:10} | fcps (last) {:10.1} | fcps {:10.1} | \
+            {:10.1} inst/s | crashes {:5} | vm {:6.4} | reset {:6.4} | \
+            syscall {:6.4}",
             elapsed,
             stats.fuzz_cases,
+            fcps_last,
             fcps,
             instps,
             stats.crashes,
@@ -727,5 +731,7 @@ fn main() {
             reset_time,
             syscall_time,
         );
+
+        last_fuzz_cases = stats.fuzz_cases;
     }
 }
