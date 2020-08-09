@@ -32,8 +32,9 @@ const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
 /// value must be bigger than 1024.
 const STACK_SIZE: usize = 1024 * 1024;
 
-/// If `true`, allocate memory with permissions WRITE|RAW, so reads of
-/// unitialized memory are detected.
+/// If `true`, allocate memory with WRITE|RAW permissions, so unitialized
+/// memory accesses are detected. Otherwise, allocate memory with WRITE|READ
+/// permissions.
 const CHECK_RAW: bool = false;
 
 /// If `true`, execute the target program using JIT compilation.
@@ -505,7 +506,7 @@ impl Fuzzer {
 
         let input_file = InputFile {
             cursor: 0,
-            contents: include_bytes!("../../../testdata/xauth"),
+            contents: include_bytes!("../../test-targets/xauth"),
         };
 
         self.input_file = Some(input_file);
@@ -557,10 +558,9 @@ impl Fuzzer {
     /// data space by `size` bytes. This function returns the previous brk
     /// address.
     ///
-    /// If CHECK_RAW is true, the new memory has the permissions RAW|WRITE, so
-    /// it's possible to detects reads to unitialized memory. On the other
-    /// hand, if CHECK_RAW is false, the new memory has the permissions
-    /// READ|WRITE.
+    /// If CHECK_RAW is true, the new memory has RAW|WRITE permissions, so
+    /// unitialized memory accesses are detected. On the other hand, if
+    /// CHECK_RAW is false, the new memory has READ|WRITE permissions.
     fn allocate(&mut self, size: usize) -> Result<VirtAddr, FuzzExit> {
         if size == 0 {
             return Ok(self.brk_addr);
@@ -678,7 +678,7 @@ fn main() {
 
     // Load the program file.
     let brk_addr = emu_init
-        .load_program("testdata/binutils/objdump-riscv")
+        .load_program("test-targets/binutils/objdump-riscv")
         .unwrap_or_else(|err| {
             eprintln!("error: could not create emulator: {}", err);
             process::exit(1);

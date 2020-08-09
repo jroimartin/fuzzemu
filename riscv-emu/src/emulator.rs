@@ -313,7 +313,8 @@ pub struct Emulator {
     /// MMU used by the emulator for memory operations.
     mmu: Mmu,
 
-    /// If `true`, execute code using JIT compilation.
+    /// If `true`, execute code using JIT compilation. Otherwise, use
+    /// emulation.
     jit_mode: bool,
 }
 
