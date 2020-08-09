@@ -3,7 +3,6 @@
 use std::fs;
 use std::io;
 use std::process::{Command, Stdio};
-use tempfile;
 
 /// NASM assembler instance.
 pub struct Nasm {
