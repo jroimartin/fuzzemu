@@ -10,6 +10,7 @@ pub struct Nasm {
     cmd: String,
 }
 
+/// The error type for nasm operations.
 #[derive(Debug)]
 pub enum Error {
     CommandFailed,
@@ -59,9 +60,21 @@ impl Nasm {
     }
 }
 
+/// Assembles asm code using the default "nasm" command. It returns the
+/// generated flat raw binary.
+pub fn assemble<C: AsRef<[u8]>>(code: C) -> Result<Vec<u8>, Error> {
+    Nasm::new("nasm").assemble(code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_assemble() {
+        let bytes = assemble("nop").unwrap();
+        assert_eq!(bytes, &[0x90]);
+    }
 
     #[test]
     fn nasm_assemble() {
