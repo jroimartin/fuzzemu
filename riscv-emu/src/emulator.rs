@@ -475,6 +475,10 @@ impl Emulator {
         loop {
             let pc = self.reg(RegAlias::Pc)?;
 
+            if pc & 3 != 0 {
+                return Err(VmExit::AddressMisaligned);
+            }
+
             let inst = self.mmu.read_int_with_perms::<u32>(
                 VirtAddr(pc as usize),
                 Perm(PERM_EXEC),
@@ -482,20 +486,18 @@ impl Emulator {
 
             *inst_execed += 1;
 
-            self.emulate_instruction(inst)?;
+            self.emulate_instruction(pc, inst)?;
         }
     }
 
     /// Emulates a single instruction, updating the internal state of the
     /// emulator.
-    fn emulate_instruction(&mut self, inst: u32) -> Result<(), VmExit> {
+    fn emulate_instruction(
+        &mut self,
+        pc: u64,
+        inst: u32,
+    ) -> Result<(), VmExit> {
         let opcode = inst & 0b111_1111;
-
-        let pc = self.reg(RegAlias::Pc)?;
-
-        if pc & 3 != 0 {
-            return Err(VmExit::AddressMisaligned);
-        }
 
         if DEBUG {
             eprintln!("---");
@@ -993,7 +995,26 @@ impl Emulator {
     }
 
     /// Run code using JIT compilation.
+    ///
+    /// Calling convention:
+    ///
+    /// rax: Scratch
+    /// rbx: Scratch
+    /// rcx: Scratch
+    /// rdx: Scratch
+    /// r8: regs
+    /// r9: memory
+    /// r9: perms
+    /// r10: dirty
+    /// r11: dirty_bitmap
+    ///
+    /// Returned values:
+    ///
+    /// rax:
+    ///   1: End of block
+    ///   2: Ebreak
+    ///   3: Ecall
     fn run_jit(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
-        todo!("JIT")
+        todo!("JIT");
     }
 }
