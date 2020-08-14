@@ -1,7 +1,7 @@
 //! Useful JIT compilation primitives.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::fmt;
 
 use crate::mmu::VirtAddr;
 
@@ -10,6 +10,15 @@ use crate::mmu::VirtAddr;
 pub enum Error {
     InvalidAddress,
     OutOfMemory,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::InvalidAddress => write!(f, "invalid address"),
+            Error::OutOfMemory => write!(f, "out of memory"),
+        }
+    }
 }
 
 /// Memory map used to store the compiled code.
@@ -22,20 +31,18 @@ pub struct JitMemory {
 
     /// Used for block deduplication. Mapping between a given slice of bytes
     /// and the pointer to the corresponding address in the JIT memory map.
-    dedup: HashMap<Vec<u8>, *const u8>,
+    dedup: HashMap<Vec<u8>, usize>,
 }
 
 /// Jit cache.
-///
-/// TODO(rm): Performance comparison with `lookup_table: Box<[AtomicUsize]>`
 pub struct JitCache {
     /// Mapping between a program address and the pointer to the corresponding
     /// compiled code. A null pointer means that the block has not been lifted
     /// yet.
-    lookup_table: Mutex<Vec<*const u8>>,
+    lookup_table: Vec<usize>,
 
     /// Memory map containing the compiled code.
-    jit_memory: Mutex<JitMemory>,
+    jit_memory: JitMemory,
 }
 
 /// Creates a memory map of size `size` with RWX permissions.
@@ -72,8 +79,8 @@ impl JitCache {
         };
 
         JitCache {
-            lookup_table: Mutex::new(vec![std::ptr::null(); size]),
-            jit_memory: Mutex::new(jit_memory),
+            lookup_table: vec![0; size],
+            jit_memory,
         }
     }
 
@@ -87,10 +94,8 @@ impl JitCache {
             return None;
         }
 
-        let lookup_table = self.lookup_table.lock().unwrap();
-
-        match lookup_table.get(*addr / 4) {
-            Some(ptr) if !ptr.is_null() => Some(*ptr),
+        match self.lookup_table.get(*addr / 4) {
+            Some(ptr) if *ptr != 0 => Some(*ptr as *const u8),
             _ => None,
         }
     }
@@ -103,7 +108,7 @@ impl JitCache {
     /// no more space in the JIT memory area, the block won't be inserted into
     /// the cache and an `Error` is returned.
     pub fn insert(
-        &self,
+        &mut self,
         addr: VirtAddr,
         block: Vec<u8>,
     ) -> Result<*const u8, Error> {
@@ -114,48 +119,45 @@ impl JitCache {
         let idx = *addr / 4;
 
         // Check if the block already exists.
-        let mut lookup_table = self.lookup_table.lock().unwrap();
-        let ptr = lookup_table.get(idx).ok_or(Error::InvalidAddress)?;
+        let ptr = self.lookup_table.get(idx).ok_or(Error::InvalidAddress)?;
 
-        if !ptr.is_null() {
-            return Ok(*ptr);
+        if *ptr != 0 {
+            return Ok(*ptr as *const u8);
         }
 
         // If the block does not exist, create a new mapping.
-        let mut jit_memory = self.jit_memory.lock().unwrap();
-
-        if let Some(ptr) = jit_memory.dedup.get(&block) {
+        if let Some(ptr) = self.jit_memory.dedup.get(&block) {
             // If the dedup hash map contains the key, map the vaddr with the
             // already existing block.
-            lookup_table[idx] = *ptr;
+            self.lookup_table[idx] = *ptr;
 
-            Ok(*ptr)
+            Ok(*ptr as *const u8)
         } else {
             // New block.
             let size = block.len();
 
-            let start = jit_memory.cursor;
+            let start = self.jit_memory.cursor;
             let end = start + size;
 
             // Check that there is enough free memory for the new block.
-            if end >= jit_memory.memory.len() {
+            if end > self.jit_memory.memory.len() {
                 return Err(Error::OutOfMemory);
             }
 
             // Copy the new block into the JIT memory map.
-            jit_memory.memory[start..end].copy_from_slice(&block);
+            self.jit_memory.memory[start..end].copy_from_slice(&block);
 
             // Update the cursor
-            jit_memory.cursor += size;
+            self.jit_memory.cursor += size;
 
             // Get a pointer to the new block.
-            let ptr = jit_memory.memory[start..end].as_ptr();
+            let ptr = self.jit_memory.memory[start..end].as_ptr();
 
             // Update the dedup hash map.
-            jit_memory.dedup.insert(block, ptr);
+            self.jit_memory.dedup.insert(block, ptr as usize);
 
             // Update the lookup table.
-            lookup_table[idx] = ptr;
+            self.lookup_table[idx] = ptr as usize;
 
             Ok(ptr)
         }
@@ -176,7 +178,7 @@ mod tests {
         "#;
         let block = nasm::assemble(code).unwrap();
 
-        let cache = JitCache::new(0x10, 0x1000);
+        let mut cache = JitCache::new(0x10, 0x1000);
         let block_ptr = cache.insert(VirtAddr(0), block).unwrap();
 
         let result: u64;
@@ -194,7 +196,7 @@ mod tests {
 
     #[test]
     fn jitcache_insert_dedup() {
-        let cache = JitCache::new(0x10, 0x1000);
+        let mut cache = JitCache::new(0x10, 0x1000);
 
         let block_ptr = cache.insert(VirtAddr(0x0), vec![0x90]).unwrap();
         let block2_ptr = cache.insert(VirtAddr(0x4), vec![0x90]).unwrap();
@@ -204,7 +206,7 @@ mod tests {
 
     #[test]
     fn jitcache_insert_invalid_address() {
-        let cache = JitCache::new(0x10, 0x1000);
+        let mut cache = JitCache::new(0x10, 0x1000);
 
         match cache.insert(VirtAddr(0x3), vec![0x90]) {
             Err(Error::InvalidAddress) => return,
@@ -215,7 +217,7 @@ mod tests {
 
     #[test]
     fn jitcache_insert_oom() {
-        let cache = JitCache::new(0x10, 0x2);
+        let mut cache = JitCache::new(0x10, 0x2);
 
         match cache.insert(VirtAddr(0x0), vec![0x90; 3]) {
             Err(Error::OutOfMemory) => return,
@@ -225,8 +227,16 @@ mod tests {
     }
 
     #[test]
+    fn jitcache_use_full_memory() {
+        let mut cache = JitCache::new(0x10, 0x4);
+        cache
+            .insert(VirtAddr(0x0), vec![0x00, 0x01, 0x02, 0x03])
+            .unwrap();
+    }
+
+    #[test]
     fn jitcache_lookup() {
-        let cache = JitCache::new(0x10, 0x1000);
+        let mut cache = JitCache::new(0x10, 0x1000);
 
         let block_ptr = cache.insert(VirtAddr(0x4), vec![0x90]).unwrap();
 
@@ -238,7 +248,7 @@ mod tests {
 
     #[test]
     fn jitcache_insert_lookup_exec() {
-        let cache = JitCache::new(0x10, 0x1000);
+        let mut cache = JitCache::new(0x10, 0x1000);
 
         let code = r#"
             BITS 64

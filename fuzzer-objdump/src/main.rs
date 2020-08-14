@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use riscv_emu::emulator::{Emulator, RegAlias, VmExit};
+use riscv_emu::jit::JitCache;
 use riscv_emu::mmu::{
     self, Mmu, Perm, VirtAddr, PERM_RAW, PERM_READ, PERM_WRITE,
 };
@@ -26,6 +27,9 @@ const NUM_THREADS: usize = 8;
 
 /// Memory size of the VM.
 const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
+
+/// Memory size of the JIT cache.
+const JIT_CACHE_SIZE: usize = 32 * 1024 * 1024;
 
 /// Amount of memory reserved for the stack at the end of the VM memory. Note
 /// that 1024 bytes will be reserved to store the program arguments, so this
@@ -155,7 +159,7 @@ impl Fuzzer {
     }
 
     /// Start a fuzzer worker. Normally, one fuzzer per core is spawned.
-    fn go(&mut self) {
+    fn go(mut self) {
         loop {
             let batch_start = rdtsc();
 
@@ -672,10 +676,6 @@ fn main() {
     let mmu = Mmu::new(VM_MEM_SIZE);
     let mut emu_init = Emulator::new(mmu);
 
-    if USE_JIT {
-        emu_init = emu_init.enable_jit();
-    }
-
     // Load the program file.
     let brk_addr = emu_init
         .load_program("test-targets/binutils/objdump-riscv")
@@ -690,6 +690,12 @@ fn main() {
         process::exit(1);
     });
 
+    // In JIT mode, create a cache and pass it to the emulator.
+    if USE_JIT {
+        let jit_cache = JitCache::new(*brk_addr, JIT_CACHE_SIZE);
+        emu_init = emu_init.with_jit(jit_cache);
+    }
+
     // `emu_init` and `stats` will be shared among threads. So, they must be
     // wrapped inside `Arc`. In the case of `stats`, it will be modified by the
     // threads, so it also need a `Mutex`.
@@ -703,8 +709,11 @@ fn main() {
     let num_threads = if DEBUG_ONE { 1 } else { NUM_THREADS };
 
     for _ in 0..num_threads {
-        let mut fuzzer =
-            Fuzzer::new(Arc::clone(&emu_init), brk_addr, Arc::clone(&stats));
+        let emu_init = Arc::clone(&emu_init);
+        let stats = Arc::clone(&stats);
+
+        let fuzzer = Fuzzer::new(emu_init, brk_addr, stats);
+
         thread::spawn(move || fuzzer.go());
     }
 

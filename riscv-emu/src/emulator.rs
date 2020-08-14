@@ -7,8 +7,10 @@ use std::fs;
 use std::io;
 use std::ops::Deref;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crate::elf::{self, Elf};
+use crate::jit::{self, JitCache};
 use crate::mmu::{self, Mmu, Perm, VirtAddr, PERM_EXEC};
 
 /// Print debug messages.
@@ -29,6 +31,8 @@ pub enum VmExit {
     IoError(io::Error),
     ElfError(elf::Error),
     MmuError(mmu::Error),
+    NasmError(nasm::Error),
+    JitError(jit::Error),
 }
 
 impl VmExit {
@@ -57,6 +61,8 @@ impl fmt::Display for VmExit {
             VmExit::IoError(err) => write!(f, "IO error: {}", err),
             VmExit::ElfError(err) => write!(f, "ELF error: {}", err),
             VmExit::MmuError(err) => write!(f, "MMU error: {}", err),
+            VmExit::NasmError(err) => write!(f, "Nasm error: {}", err),
+            VmExit::JitError(err) => write!(f, "JIT error: {}", err),
         }
     }
 }
@@ -76,6 +82,18 @@ impl From<elf::Error> for VmExit {
 impl From<mmu::Error> for VmExit {
     fn from(error: mmu::Error) -> VmExit {
         VmExit::MmuError(error)
+    }
+}
+
+impl From<nasm::Error> for VmExit {
+    fn from(error: nasm::Error) -> VmExit {
+        VmExit::NasmError(error)
+    }
+}
+
+impl From<jit::Error> for VmExit {
+    fn from(error: jit::Error) -> VmExit {
+        VmExit::JitError(error)
     }
 }
 
@@ -313,9 +331,12 @@ pub struct Emulator {
     /// MMU used by the emulator for memory operations.
     mmu: Mmu,
 
-    /// If `true`, execute code using JIT compilation. Otherwise, use
-    /// emulation.
-    jit_mode: bool,
+    /// JIT cache. If `Some`, execute code using JIT compilation. Otherwise,
+    /// use emulation.
+    ///
+    /// The cache is shared among all the emulator instances and must be
+    /// thread-safe, that's why it's wrapped inside Arc<Mutex<>>.
+    jit_cache: Option<Arc<Mutex<JitCache>>>,
 }
 
 impl fmt::Display for Emulator {
@@ -346,7 +367,7 @@ impl Emulator {
         Emulator {
             regs: [0; 33],
             mmu,
-            jit_mode: false,
+            jit_cache: None,
         }
     }
 
@@ -355,14 +376,38 @@ impl Emulator {
         &self.mmu
     }
 
+    /// Returns a copy of the Emulator, including its internal state.
+    pub fn fork(&self) -> Emulator {
+        let jit_cache = if let Some(cache) = &self.jit_cache {
+            Some(Arc::clone(&cache))
+        } else {
+            None
+        };
+
+        Emulator {
+            regs: self.regs,
+            mmu: self.mmu.fork(),
+            jit_cache,
+        }
+    }
+
+    /// Resets the internal state of the emulator to the given state `other`.
+    pub fn reset(&mut self, other: &Emulator) {
+        self.regs = other.regs;
+        self.mmu.reset(&other.mmu);
+    }
+
     /// Returns a mutable reference to the internal MMU of the emulator.
     pub fn mmu_mut(&mut self) -> &mut Mmu {
         &mut self.mmu
     }
 
-    /// Enable JIT compilation.
-    pub fn enable_jit(mut self) -> Emulator {
-        self.jit_mode = true;
+    /// Enable JIT compilation. `cache` is the JIT cache used to store the
+    /// compiled instructions.
+    pub fn with_jit(mut self, cache: JitCache) -> Emulator {
+        let cache = Arc::new(Mutex::new(cache));
+
+        self.jit_cache = Some(cache);
         self
     }
 
@@ -407,22 +452,6 @@ impl Emulator {
         Ok(VirtAddr(max_addr))
     }
 
-    /// Returns a copy of the Emulator, including its internal state.
-    pub fn fork(&self) -> Emulator {
-        Emulator {
-            regs: self.regs,
-            mmu: self.mmu.fork(),
-            jit_mode: self.jit_mode,
-        }
-    }
-
-    /// Resets the internal state of the emulator to the given state `other`.
-    pub fn reset(&mut self, other: &Emulator) {
-        self.regs = other.regs;
-        self.mmu.reset(&other.mmu);
-        self.jit_mode = other.jit_mode;
-    }
-
     /// Sets the value of the register `reg` to `val`.
     pub fn set_reg<T: Into<Reg>>(
         &mut self,
@@ -461,7 +490,7 @@ impl Emulator {
     /// Run until vm exit or error. In returns the number of executed
     /// instructions in `inst_execed`.
     pub fn run(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
-        if self.jit_mode {
+        if self.jit_cache.is_some() {
             self.run_jit(inst_execed)
         } else {
             self.run_emu(inst_execed)
@@ -469,7 +498,7 @@ impl Emulator {
     }
 
     /// Run code using pure emulation.
-    fn run_emu(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
+    pub fn run_emu(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
         *inst_execed = 0;
 
         loop {
@@ -996,25 +1025,81 @@ impl Emulator {
 
     /// Run code using JIT compilation.
     ///
-    /// Calling convention:
+    /// # Panics
     ///
-    /// rax: Scratch
-    /// rbx: Scratch
-    /// rcx: Scratch
-    /// rdx: Scratch
-    /// r8: regs
-    /// r9: memory
-    /// r9: perms
-    /// r10: dirty
-    /// r11: dirty_bitmap
-    ///
-    /// Returned values:
-    ///
-    /// rax:
-    ///   1: End of block
-    ///   2: Ebreak
-    ///   3: Ecall
-    fn run_jit(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
-        todo!("JIT");
+    /// This function will panic if the Emulator's JIT cache has not been
+    /// initialized using `with_jit`.
+    pub fn run_jit(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
+        loop {
+            let pc = self.reg(RegAlias::Pc)?;
+
+            if pc & 3 != 0 {
+                return Err(VmExit::AddressMisaligned);
+            }
+
+            let block_lookup = {
+                let jit_cache =
+                    self.jit_cache.as_ref().unwrap().lock().unwrap();
+                jit_cache.lookup(VirtAddr(pc as usize))
+            };
+
+            let block_ptr = if let Some(ptr) = block_lookup {
+                ptr
+            } else {
+                let block = self.lift_block(pc)?;
+
+                let mut jit_cache =
+                    self.jit_cache.as_ref().unwrap().lock().unwrap();
+                jit_cache.insert(VirtAddr(pc as usize), block)?
+            };
+
+            todo!("call block_ptr")
+        }
+    }
+
+    /// Lifts a basic block.
+    fn lift_block(&mut self, mut pc: u64) -> Result<Vec<u8>, VmExit> {
+        let mut code = String::new();
+
+        loop {
+            let inst = self.mmu.read_int_with_perms::<u32>(
+                VirtAddr(pc as usize),
+                Perm(PERM_EXEC),
+            )?;
+
+            match self.lift_instruction(pc, inst) {
+                Ok((inst_code, end)) => {
+                    code.push_str(&inst_code);
+                    pc = pc.wrapping_add(4);
+
+                    if end {
+                        break;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        let block = nasm::assemble(code)?;
+        Ok(block)
+    }
+
+    /// Lifts a single instruction. It returns a String containing the lifted
+    /// assembly code and a boolean signaling if the lifted instruction is the
+    /// end of the block.
+    fn lift_instruction(
+        &mut self,
+        pc: u64,
+        inst: u32,
+    ) -> Result<(String, bool), VmExit> {
+        let opcode = inst & 0b111_1111;
+
+        if DEBUG {
+            eprintln!("---");
+            eprintln!("{}", self);
+            eprintln!("{:#010x}: {:08x} {:07b}", pc, inst, opcode);
+        }
+
+        todo!("lift instruction")
     }
 }

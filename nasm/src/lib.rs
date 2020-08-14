@@ -1,5 +1,6 @@
 //! Easy-to-use interface with NASM (The Netwide Assembler).
 
+use std::fmt;
 use std::fs;
 use std::io;
 use std::process::{Command, Stdio};
@@ -16,6 +17,15 @@ pub enum Error {
     CommandFailed,
 
     IoError(io::Error),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::CommandFailed => write!(f, "command failed"),
+            Error::IoError(err) => write!(f, "IO error: {}", err),
+        }
+    }
 }
 
 impl From<io::Error> for Error {
