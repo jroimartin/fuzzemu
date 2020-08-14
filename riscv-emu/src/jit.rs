@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn jitcache_use_full_memory() {
+    fn jitcache_use_all_memory() {
         let mut cache = JitCache::new(0x10, 0x4);
         cache
             .insert(VirtAddr(0x0), vec![0x00, 0x01, 0x02, 0x03])
