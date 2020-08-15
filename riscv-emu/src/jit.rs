@@ -84,6 +84,11 @@ impl JitCache {
         }
     }
 
+    /// Returns a raw pointer to the internal lookup table.
+    pub fn lookup_table_ptr(&self) -> *const usize {
+        self.lookup_table.as_ptr()
+    }
+
     /// Returns a pointer to the lifted block corresponding to the virtual
     /// address `addr`. If the block is not in the chache or the address is not
     /// valid, None is returned.

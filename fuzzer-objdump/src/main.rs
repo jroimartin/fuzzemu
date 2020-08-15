@@ -274,7 +274,7 @@ impl Fuzzer {
             214 => self.syscall_brk()?,
             1024 => self.syscall_open()?,
             1038 => self.syscall_stat()?,
-            _ => todo!("[{:#010x}] unknown syscall", pc),
+            _ => unimplemented!("[{:#010x}] unknown syscall", pc),
         };
 
         // The syscall dispatcher is in charge of advancing PC.

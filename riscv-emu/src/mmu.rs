@@ -203,6 +203,26 @@ impl Mmu {
         self.dirty.clear();
     }
 
+    /// Returns a raw pointer to the internal memory buffer.
+    pub fn memory_ptr(&self) -> *const u8 {
+        self.memory.as_ptr()
+    }
+
+    /// Returns a raw pointer to the internal permissions buffer.
+    pub fn perms_ptr(&self) -> *const Perm {
+        self.perms.as_ptr()
+    }
+
+    /// Returns a raw pointer to the internal list of dirty blocks.
+    pub fn dirty_ptr(&self) -> *const usize {
+        self.dirty.as_ptr()
+    }
+
+    /// Returns a raw pointer to the internal bitmap of dirty blocks.
+    pub fn dirty_bitmap_ptr(&self) -> *const u64 {
+        self.dirty_bitmap.as_ptr()
+    }
+
     /// Set memory permissions in the given range.
     pub fn set_perms(
         &mut self,

@@ -14,7 +14,7 @@ use crate::jit::{self, JitCache};
 use crate::mmu::{self, Mmu, Perm, VirtAddr, PERM_EXEC};
 
 /// Print debug messages.
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
 /// Emulator's exit reason.
 #[derive(Debug)]
@@ -379,7 +379,7 @@ impl Emulator {
     /// Returns a copy of the Emulator, including its internal state.
     pub fn fork(&self) -> Emulator {
         let jit_cache = if let Some(cache) = &self.jit_cache {
-            Some(Arc::clone(&cache))
+            Some(Arc::clone(cache))
         } else {
             None
         };
@@ -453,9 +453,9 @@ impl Emulator {
     }
 
     /// Sets the value of the register `reg` to `val`.
-    pub fn set_reg<T: Into<Reg>>(
+    pub fn set_reg<R: Into<Reg>>(
         &mut self,
-        reg: T,
+        reg: R,
         val: u64,
     ) -> Result<(), VmExit> {
         let reg = *reg.into() as usize;
@@ -465,14 +465,14 @@ impl Emulator {
         }
 
         // The zero register is always 0.
-        if reg != 0 {
+        if reg != RegAlias::Zero as usize {
             self.regs[reg] = val;
         }
         Ok(())
     }
 
     /// Returns the value stored in the register `reg`.
-    pub fn reg<T: Into<Reg>>(&self, reg: T) -> Result<u64, VmExit> {
+    pub fn reg<R: Into<Reg>>(&self, reg: R) -> Result<u64, VmExit> {
         let reg = *reg.into() as usize;
 
         if reg >= self.regs.len() {
@@ -480,7 +480,7 @@ impl Emulator {
         }
 
         // The zero register is always 0.
-        if reg == 0 {
+        if reg == RegAlias::Zero as usize {
             Ok(0)
         } else {
             Ok(self.regs[reg])
@@ -499,8 +499,6 @@ impl Emulator {
 
     /// Run code using pure emulation.
     pub fn run_emu(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
-        *inst_execed = 0;
-
         loop {
             let pc = self.reg(RegAlias::Pc)?;
 
@@ -902,7 +900,7 @@ impl Emulator {
             0b1110011 => {
                 let dec = Itype::from(inst);
 
-                if dec.rd == Reg(0) && dec.funct3 == 0 && dec.rs1 == Reg(0) {
+                if *dec.rd == 0 && dec.funct3 == 0 && *dec.rs1 == 0 {
                     if dec.imm == 0 {
                         // ECALL
                         return Err(VmExit::Ecall);
@@ -1029,18 +1027,37 @@ impl Emulator {
     ///
     /// This function will panic if the Emulator's JIT cache has not been
     /// initialized using `with_jit`.
+    ///
+    /// # Calling convention
+    ///
+    /// Input:
+    ///   r8: number of executed instructions
+    ///   r9: JIT cache lookup table
+    ///   r10: Emulator registers
+    ///   r11: Mmu memory
+    ///
+    /// Output:
+    ///   rax: jit exit reason
+    ///     rax=0: JIT cache lookup error
+    ///     rax=1: ECALL exception
+    ///     rax=2: EBREAK exception
+    ///   rbx: next PC. In the case of ECALL and EBREAK, the address of that
+    ///        instruction
+    ///   r8: number of executed instructions
     pub fn run_jit(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
-        loop {
-            let pc = self.reg(RegAlias::Pc)?;
+        let mut pc = self.reg(RegAlias::Pc)?;
 
+        loop {
             if pc & 3 != 0 {
                 return Err(VmExit::AddressMisaligned);
             }
 
-            let block_lookup = {
+            let (lookup_table_ptr, block_lookup) = {
                 let jit_cache =
                     self.jit_cache.as_ref().unwrap().lock().unwrap();
-                jit_cache.lookup(VirtAddr(pc as usize))
+                let lookup_table_ptr = jit_cache.lookup_table_ptr();
+                let block_lookup = jit_cache.lookup(VirtAddr(pc as usize));
+                (lookup_table_ptr, block_lookup)
             };
 
             let block_ptr = if let Some(ptr) = block_lookup {
@@ -1053,24 +1070,75 @@ impl Emulator {
                 jit_cache.insert(VirtAddr(pc as usize), block)?
             };
 
-            todo!("call block_ptr")
+            let regs_ptr = self.regs.as_ptr();
+            let memory_ptr = self.mmu.memory_ptr();
+
+            let jit_exit: u64;
+            let next_pc: u64;
+
+            unsafe {
+                asm!("call {block_ptr}",
+                     block_ptr = in(reg) block_ptr,
+                     inout("r8") *inst_execed,
+                     in("r9") lookup_table_ptr,
+                     in("r10") regs_ptr,
+                     in("r11") memory_ptr,
+                     out("rax") jit_exit,
+                     out("rbx") next_pc,
+                     out("rcx") _,
+                     out("rdx") _,
+                );
+            }
+
+            // Update the PC register with the next PC. Needed by exception
+            // handlers and debug messages.
+            self.set_reg(RegAlias::Pc, next_pc)?;
+
+            if DEBUG {
+                eprintln!(
+                    "jit_exit={:#x} next_pc={:#x} inst_execed={}",
+                    jit_exit, next_pc, inst_execed
+                );
+            }
+
+            match jit_exit {
+                0 => {
+                    pc = next_pc;
+                    continue;
+                }
+                1 => {
+                    return Err(VmExit::Ecall);
+                }
+                2 => {
+                    return Err(VmExit::Ebreak);
+                }
+                _ => unimplemented!("unknown jit_exit value"),
+            }
         }
     }
 
     /// Lifts a basic block.
-    fn lift_block(&mut self, mut pc: u64) -> Result<Vec<u8>, VmExit> {
+    fn lift_block(&mut self, pc: u64) -> Result<Vec<u8>, VmExit> {
         let mut code = String::new();
+        let mut num_inst = 0;
+        let mut cur_pc = pc;
+
+        if DEBUG {
+            eprintln!("lifting {:#010x}", pc);
+        }
 
         loop {
             let inst = self.mmu.read_int_with_perms::<u32>(
-                VirtAddr(pc as usize),
+                VirtAddr(cur_pc as usize),
                 Perm(PERM_EXEC),
             )?;
 
-            match self.lift_instruction(pc, inst) {
+            match self.lift_instruction(cur_pc, inst) {
                 Ok((inst_code, end)) => {
                     code.push_str(&inst_code);
-                    pc = pc.wrapping_add(4);
+
+                    cur_pc = cur_pc.wrapping_add(4);
+                    num_inst += 1;
 
                     if end {
                         break;
@@ -1080,7 +1148,32 @@ impl Emulator {
             }
         }
 
-        let block = nasm::assemble(code)?;
+        let code = format!(
+            "
+                BITS 64
+
+                block_{pc:x}:
+                add r8, {num_inst}
+
+                {code}
+
+                ret
+            ",
+            pc = pc,
+            num_inst = num_inst,
+            code = code
+        );
+
+        let block = match nasm::assemble(&code) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                if DEBUG {
+                    eprintln!("{}", &code);
+                }
+                return Err(err.into());
+            }
+        };
+
         Ok(block)
     }
 
@@ -1094,12 +1187,707 @@ impl Emulator {
     ) -> Result<(String, bool), VmExit> {
         let opcode = inst & 0b111_1111;
 
-        if DEBUG {
-            eprintln!("---");
-            eprintln!("{}", self);
-            eprintln!("{:#010x}: {:08x} {:07b}", pc, inst, opcode);
+        let mut code = String::new();
+
+        macro_rules! write_reg {
+            ($dst_riscv_reg:expr, $src:expr) => {
+                if *$dst_riscv_reg == RegAlias::Zero as u32 {
+                    String::from("\n")
+                } else {
+                    format!(
+                        "mov qword [r10+8*{riscv_reg}], {src}\n",
+                        riscv_reg = *$dst_riscv_reg,
+                        src = $src
+                    )
+                }
+            };
         }
 
-        todo!("lift instruction")
+        macro_rules! read_reg {
+            ($src_riscv_reg:expr, $dst:expr) => {
+                if *$src_riscv_reg == RegAlias::Zero as u32 {
+                    format!("xor {dst}, {dst}\n", dst = $dst)
+                } else {
+                    format!(
+                        "mov {dst}, qword [r10+8*{riscv_reg}]\n",
+                        dst = $dst,
+                        riscv_reg = *$src_riscv_reg
+                    )
+                }
+            };
+        }
+
+        match opcode {
+            0b0110111 => {
+                // LUI
+                let dec = Utype::from(inst);
+
+                code.push_str(&write_reg!(dec.rd, dec.imm as u64));
+            }
+            0b0010111 => {
+                // AUIPIC
+                let dec = Utype::from(inst);
+
+                code.push_str(&write_reg!(
+                    dec.rd,
+                    pc.wrapping_add(dec.imm as u64)
+                ));
+            }
+            0b1101111 => {
+                // JAL
+                let dec = Jtype::from(inst);
+
+                let offset = dec.imm as u64;
+
+                code.push_str(&write_reg!(dec.rd, pc.wrapping_add(4)));
+                code.push_str(&format!(
+                    "
+                        mov rbx, {target:#x}
+                        mov rax, rbx
+                        shr rax, 2
+                        mov rax, [r9+8*rax]
+                        test rax, rax
+                        jz .lookup_error_{pc:x}
+                        jmp rax
+                        .lookup_error_{pc:x}:
+                        xor rax, rax
+                    ",
+                    target = pc.wrapping_add(offset),
+                    pc = pc
+                ));
+
+                return Ok((code, true));
+            }
+            0b1100111 => {
+                let dec = Itype::from(inst);
+
+                let offset = dec.imm as u64;
+
+                match dec.funct3 {
+                    0b000 => {
+                        // JALR
+                        code.push_str(&write_reg!(dec.rd, pc.wrapping_add(4)));
+                        code.push_str(&read_reg!(dec.rs1, "rbx"));
+                        code.push_str(&format!(
+                            "
+                                add rbx, {offset}
+                                shr rbx, 1
+                                shl rbx, 1
+                                mov rax, rbx
+                                shr rax, 2
+                                mov rax, [r9+8*rax]
+                                test rax, rax
+                                jz .lookup_error_{pc:x}
+                                jmp rax
+                                .lookup_error_{pc:x}:
+                                xor rax, rax
+                            ",
+                            offset = offset as i32,
+                            pc = pc
+                        ));
+
+                        return Ok((code, true));
+                    }
+                    _ => return Err(VmExit::UnimplementedInstruction),
+                }
+            }
+            0b1100011 => {
+                let dec = Btype::from(inst);
+
+                let offset = dec.imm as u64;
+
+                let cmp_inst = match dec.funct3 {
+                    0b000 => "jne",  // BEQ
+                    0b001 => "je",   // BNE
+                    0b100 => "jnl",  // BLT
+                    0b101 => "jnge", // BGE
+                    0b110 => "jnb",  // BLTU
+                    0b111 => "jnae", // BGEU
+                    _ => return Err(VmExit::InvalidInstruction),
+                };
+
+                code.push_str(&read_reg!(dec.rs1, "rcx"));
+                code.push_str(&read_reg!(dec.rs2, "rdx"));
+                code.push_str(&format!(
+                    "
+                        cmp rcx, rdx
+                        {cmp_inst} .out_{pc:x}
+
+                        mov rbx, {target:#x}
+                        mov rax, rbx
+                        shr rax, 2
+                        mov rax, [r9+8*rax]
+                        test rax, rax
+                        jz .lookup_error_{pc:x}
+                        jmp rax
+                        .lookup_error_{pc:x}:
+                        xor rax, rax
+                        ret
+
+                        .out_{pc:x}:
+                    ",
+                    target = pc.wrapping_add(offset),
+                    cmp_inst = cmp_inst,
+                    pc = pc
+                ));
+            }
+            0b0000011 => {
+                let dec = Itype::from(inst);
+
+                let offset = dec.imm as u64;
+
+                let (mov_inst, size, dst_reg) = match dec.funct3 {
+                    0b000 => ("movsx", "byte", "rax"),  // LB
+                    0b001 => ("movsx", "word", "rax"),  // LH
+                    0b010 => ("movsx", "dword", "rax"), // LW
+                    0b100 => ("movzx", "byte", "rax"),  // LBU
+                    0b101 => ("movzx", "word", "rax"),  // LHU
+                    0b110 => ("mov", "dword", "eax"),   // LWU
+                    0b011 => ("mov", "qword", "rax"),   // LD
+                    _ => return Err(VmExit::InvalidInstruction),
+                };
+
+                code.push_str(&read_reg!(dec.rs1, "rax"));
+                code.push_str(&format!(
+                    "
+                        add rax, {offset}
+                        {mov_inst} {dst_reg}, {size} [r11+rax]
+                    ",
+                    offset = offset as i32,
+                    mov_inst = mov_inst,
+                    dst_reg = dst_reg,
+                    size = size
+                ));
+                code.push_str(&write_reg!(dec.rd, "rax"));
+            }
+            0b0100011 => {
+                let dec = Stype::from(inst);
+
+                let offset = dec.imm as u64;
+
+                let (mov_inst, size, src_reg) = match dec.funct3 {
+                    0b000 => ("mov", "byte", "bl"),   // SB
+                    0b001 => ("mov", "word", "bx"),   // SH
+                    0b010 => ("mov", "dword", "ebx"), // SW
+                    0b011 => ("mov", "qword", "rbx"), // SD
+                    _ => return Err(VmExit::InvalidInstruction),
+                };
+
+                code.push_str(&read_reg!(dec.rs1, "rax"));
+                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                code.push_str(&format!(
+                    "
+                        add rax, {offset}
+                        {mov_inst} {size} [r11+rax], {src_reg}
+                    ",
+                    offset = offset as i32,
+                    mov_inst = mov_inst,
+                    size = size,
+                    src_reg = src_reg
+                ));
+            }
+            0b0010011 => {
+                let dec = Itype::from(inst);
+
+                let imm = dec.imm as u64;
+
+                match dec.funct3 {
+                    0b000 => {
+                        // ADDI
+                        code.push_str(&read_reg!(dec.rs1, "rax"));
+                        code.push_str(&format!(
+                            "
+                                add rax, {imm}
+                            ",
+                            imm = imm as i32
+                        ));
+                        code.push_str(&write_reg!(dec.rd, "rax"));
+                    }
+                    0b010 => {
+                        // SLTI
+                        code.push_str(&read_reg!(dec.rs1, "rax"));
+                        code.push_str(&format!(
+                            "
+                                xor rcx, rcx
+                                mov rbx, {imm}
+                                cmp rax, rbx
+                                jnl .out_{pc:x}
+                                inc rcx
+                                .out_{pc:x}:
+                            ",
+                            imm = imm,
+                            pc = pc
+                        ));
+                        code.push_str(&write_reg!(dec.rd, "rcx"));
+                    }
+                    0b011 => {
+                        // SLTIU
+                        code.push_str(&read_reg!(dec.rs1, "rax"));
+                        code.push_str(&format!(
+                            "
+                                xor rcx, rcx
+                                mov rbx, {imm}
+                                cmp rax, rbx
+                                jnb .out_{pc:x}
+                                inc rcx
+                                .out_{pc:x}:
+                            ",
+                            imm = imm,
+                            pc = pc
+                        ));
+                        code.push_str(&write_reg!(dec.rd, "rcx"));
+                    }
+                    0b100 => {
+                        // XORI
+                        code.push_str(&read_reg!(dec.rs1, "rax"));
+                        code.push_str(&format!(
+                            "
+                                xor rax, {imm:#x}
+                            ",
+                            imm = imm
+                        ));
+                        code.push_str(&write_reg!(dec.rd, "rax"));
+                    }
+                    0b110 => {
+                        // ORI
+                        code.push_str(&read_reg!(dec.rs1, "rax"));
+                        code.push_str(&format!(
+                            "
+                                or rax, {imm:#x}
+                            ",
+                            imm = imm
+                        ));
+                        code.push_str(&write_reg!(dec.rd, "rax"));
+                    }
+                    0b111 => {
+                        // ANDI
+                        code.push_str(&read_reg!(dec.rs1, "rax"));
+                        code.push_str(&format!(
+                            "
+                                and rax, {imm:#x}
+                            ",
+                            imm = imm
+                        ));
+                        code.push_str(&write_reg!(dec.rd, "rax"));
+                    }
+                    0b001 => {
+                        match dec.imm as u32 >> 6 {
+                            0b000000 => {
+                                // SLLI
+                                let shamt = dec.imm & 0b11_1111;
+
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&format!(
+                                    "
+                                        shl rax, {shamt:#x}
+                                    ",
+                                    shamt = shamt
+                                ));
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b101 => {
+                        match dec.imm as u32 >> 6 {
+                            0b000000 => {
+                                // SRLI
+                                let shamt = dec.imm & 0b11_1111;
+
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&format!(
+                                    "
+                                        shr rax, {shamt:#x}
+                                    ",
+                                    shamt = shamt
+                                ));
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            0b010000 => {
+                                // SRAI
+                                let shamt = dec.imm & 0b1_11111;
+
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&format!(
+                                    "
+                                        sar rax, {shamt:#x}
+                                    ",
+                                    shamt = shamt
+                                ));
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    _ => return Err(VmExit::InvalidInstruction),
+                }
+            }
+            0b0110011 => {
+                let dec = Rtype::from(inst);
+
+                match dec.funct3 {
+                    0b000 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                // ADD
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                                code.push_str(
+                                    "
+                                        add rax, rbx
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            0b0100000 => {
+                                // SUB
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                                code.push_str(
+                                    "
+                                        sub rax, rbx
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b001 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                // SLL
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rcx"));
+                                code.push_str(
+                                    "
+                                        and rcx, 0x1f
+                                        shl rax, cl
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b010 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                // SLT
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                                code.push_str(&format!(
+                                    "
+                                        xor rcx, rcx
+                                        cmp rax, rbx
+                                        jnl .out_{pc:x}
+                                        inc rcx
+                                        .out_{pc:x}:
+                                    ",
+                                    pc = pc
+                                ));
+                                code.push_str(&write_reg!(dec.rd, "rcx"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b011 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                // SLTU
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                                code.push_str(&format!(
+                                    "
+                                        xor rcx, rcx
+                                        cmp rax, rbx
+                                        jnb .out_{pc:x}
+                                        inc rcx
+                                        .out_{pc:x}:
+                                    ",
+                                    pc = pc
+                                ));
+                                code.push_str(&write_reg!(dec.rd, "rcx"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b100 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                // XOR
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                                code.push_str(
+                                    "
+                                        xor rax, rbx
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b101 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                // SRL
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rcx"));
+                                code.push_str(
+                                    "
+                                        and rcx, 0x1f
+                                        shr rax, cl
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            0b0100000 => {
+                                // SRA
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rcx"));
+                                code.push_str(
+                                    "
+                                        and rcx, 0x1f
+                                        sar rax, cl
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b110 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                // OR
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                                code.push_str(
+                                    "
+                                        or rax, rbx
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b111 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                // AND
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                                code.push_str(
+                                    "
+                                        and rax, rbx
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    _ => return Err(VmExit::InvalidInstruction),
+                }
+            }
+            0b0001111 => {
+                // FENCE
+                return Err(VmExit::UnimplementedInstruction);
+            }
+            0b1110011 => {
+                let dec = Itype::from(inst);
+
+                if *dec.rd == 0 && dec.funct3 == 0 && *dec.rs1 == 0 {
+                    if dec.imm == 0 {
+                        // ECALL
+                        code.push_str(&format!(
+                            "
+                                mov rax, 1
+                                mov rbx, {pc:#x}
+                            ",
+                            pc = pc,
+                        ));
+                        return Ok((code, true));
+                    } else if dec.imm == 1 {
+                        // EBREAK
+                        code.push_str(&format!(
+                            "
+                                mov rax, 2
+                                mov rbx, {pc:#x}
+                            ",
+                            pc = pc,
+                        ));
+                        return Ok((code, true));
+                    } else {
+                        return Err(VmExit::InvalidInstruction);
+                    }
+                } else {
+                    return Err(VmExit::InvalidInstruction);
+                }
+            }
+            0b0011011 => {
+                let dec = Itype::from(inst);
+
+                let imm = dec.imm as u32;
+
+                match dec.funct3 {
+                    0b000 => {
+                        // ADDIW
+                        code.push_str(&read_reg!(dec.rs1, "rax"));
+                        code.push_str(&format!(
+                            "
+                                add eax, {imm}
+                                movsx rax, eax
+                            ",
+                            imm = imm as i32
+                        ));
+                        code.push_str(&write_reg!(dec.rd, "rax"));
+                    }
+                    0b001 => {
+                        match dec.imm as u32 >> 6 {
+                            0b000000 => {
+                                // SLLIW
+                                let shamt = dec.imm & 0b11_1111;
+
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&format!(
+                                    "
+                                        shl eax, {shamt:#x}
+                                        movsx rax, eax
+                                    ",
+                                    shamt = shamt
+                                ));
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b101 => {
+                        match dec.imm as u32 >> 6 {
+                            0b000000 => {
+                                // SRLIW
+                                let shamt = dec.imm & 0b11_1111;
+
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&format!(
+                                    "
+                                        shr eax, {shamt:#x}
+                                        movsx rax, eax
+                                    ",
+                                    shamt = shamt
+                                ));
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            0b010000 => {
+                                // SRAIW
+                                let shamt = dec.imm & 0b11_1111;
+
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&format!(
+                                    "
+                                        sar eax, {shamt:#x}
+                                        movsx rax, eax
+                                    ",
+                                    shamt = shamt
+                                ));
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    _ => return Err(VmExit::InvalidInstruction),
+                }
+            }
+            0b0111011 => {
+                let dec = Rtype::from(inst);
+
+                match dec.funct3 {
+                    0b000 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                //ADDW
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                                code.push_str(
+                                    "
+                                        add eax, ebx
+                                        movsx rax, eax
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            0b0100000 => {
+                                //SUBW
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                                code.push_str(
+                                    "
+                                        sub eax, ebx
+                                        movsx rax, eax
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b001 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                //SLLW
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rcx"));
+                                code.push_str(
+                                    "
+                                        and rcx, 0x1f
+                                        shl eax, cl
+                                        movsx rax, eax
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    0b101 => {
+                        match dec.funct7 {
+                            0b0000000 => {
+                                //SRLW
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rcx"));
+                                code.push_str(
+                                    "
+                                        and rcx, 0x1f
+                                        shr eax, cl
+                                        movsx rax, eax
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            0b0100000 => {
+                                //SRAW
+                                code.push_str(&read_reg!(dec.rs1, "rax"));
+                                code.push_str(&read_reg!(dec.rs2, "rcx"));
+                                code.push_str(
+                                    "
+                                        and rcx, 0x1f
+                                        sar eax, cl
+                                        movsx rax, eax
+                                    ",
+                                );
+                                code.push_str(&write_reg!(dec.rd, "rax"));
+                            }
+                            _ => return Err(VmExit::InvalidInstruction),
+                        }
+                    }
+                    _ => return Err(VmExit::InvalidInstruction),
+                }
+            }
+            _ => return Err(VmExit::InvalidInstruction),
+        }
+
+        Ok((code, false))
     }
 }
