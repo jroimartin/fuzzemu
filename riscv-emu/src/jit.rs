@@ -84,6 +84,11 @@ impl JitCache {
         }
     }
 
+    /// Returns the length of the internal lookup table.
+    pub fn lookup_table_len(&self) -> usize {
+        self.lookup_table.len()
+    }
+
     /// Returns a raw pointer to the internal lookup table.
     pub fn lookup_table_ptr(&self) -> *const usize {
         self.lookup_table.as_ptr()

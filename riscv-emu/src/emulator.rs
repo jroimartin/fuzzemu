@@ -1024,23 +1024,23 @@ impl Emulator {
     /// # Calling convention
     ///
     /// Input:
-    ///   r8: number of executed instructions
-    ///   r9: JIT cache lookup table
-    ///   r10: Emulator registers
-    ///   r11: Mmu memory
-    ///   r12: Mmu dirty blocks
-    ///   r13: Mmu dirty bitmap
-    ///   r14: Mmu dirty len
+    /// - `r8`: number of executed instructions.
+    /// - `r9`: JIT cache lookup table.
+    /// - `r10`: Emulator registers.
+    /// - `r11`: Mmu memory.
+    /// - `r12`: Mmu dirty blocks.
+    /// - `r13`: Mmu dirty bitmap.
+    /// - `r14`: Mmu dirty length.
     ///
     /// Output:
-    ///   rax: jit exit reason
-    ///     rax=0: JIT cache lookup error
-    ///     rax=1: ECALL exception
-    ///     rax=2: EBREAK exception
-    ///   rbx: next PC. In the case of ECALL and EBREAK, it's the address of
-    ///     the instruction.
-    ///   r8: updated number of executed instructions
-    ///   r14: updated Mmu dirty len
+    /// - `rax`: JIT exit reason.
+    ///   - `rax=0`: JIT cache lookup error.
+    ///   - `rax=1`: ECALL exception
+    ///   - `rax=2`: EBREAK exception
+    /// - `rbx`: Next PC. In the case of a exception (EBREAK, ECALL or fault),
+    ///   it's the address of the instruction causing the exception.
+    /// - `r8`: Updated number of executed instructions.
+    /// - `r14`: Updated Mmu dirty len.
     pub fn run_jit(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
         let mut pc = self.reg(RegAlias::Pc)?;
 
@@ -1049,18 +1049,21 @@ impl Emulator {
                 return Err(VmExit::AddressMisaligned);
             }
 
-            let (lookup_table_ptr, block_lookup) = {
+            let (lookup_table_ptr, lookup_table_len, block_lookup) = {
                 let jit_cache =
                     self.jit_cache.as_ref().unwrap().lock().unwrap();
-                let lookup_table_ptr = jit_cache.lookup_table_ptr();
-                let block_lookup = jit_cache.lookup(VirtAddr(pc as usize));
-                (lookup_table_ptr, block_lookup)
+
+                (
+                    jit_cache.lookup_table_ptr(),
+                    jit_cache.lookup_table_len(),
+                    jit_cache.lookup(VirtAddr(pc as usize)),
+                )
             };
 
             let block_ptr = if let Some(ptr) = block_lookup {
                 ptr
             } else {
-                let block = self.lift_block(pc)?;
+                let block = self.lift_block(pc, lookup_table_len)?;
 
                 let mut jit_cache =
                     self.jit_cache.as_ref().unwrap().lock().unwrap();
@@ -1127,7 +1130,11 @@ impl Emulator {
     }
 
     /// Lifts a basic block.
-    fn lift_block(&mut self, pc: u64) -> Result<Vec<u8>, VmExit> {
+    fn lift_block(
+        &mut self,
+        pc: u64,
+        lookup_table_len: usize,
+    ) -> Result<Vec<u8>, VmExit> {
         let mut code = String::new();
         let mut cur_pc = pc;
 
@@ -1141,7 +1148,7 @@ impl Emulator {
                 Perm(PERM_EXEC),
             )?;
 
-            match self.lift_instruction(cur_pc, inst) {
+            match self.lift_instruction(cur_pc, inst, lookup_table_len) {
                 Ok((inst_code, end)) => {
                     code.push_str(&format!(
                         "
@@ -1193,6 +1200,7 @@ impl Emulator {
         &mut self,
         pc: u64,
         inst: u32,
+        lookup_table_len: usize,
     ) -> Result<(String, bool), VmExit> {
         let opcode = inst & 0b111_1111;
 
@@ -1200,6 +1208,9 @@ impl Emulator {
 
         // Returns a `String` containing the asm code to write into a RISC-V
         // register.
+        //
+        // We don't need to check for OOB here because instruction encoding
+        // forces registers to be in the range [0, 31].
         macro_rules! write_reg {
             ($dst_riscv_reg:expr, $src:expr) => {
                 if *$dst_riscv_reg == RegAlias::Zero as u32 {
@@ -1216,6 +1227,9 @@ impl Emulator {
 
         // Returns a `String` containing the asm code to read from a RISC-V
         // register.
+        //
+        // We don't need to check for OOB here because instruction encoding
+        // forces registers to be in the range [0, 31].
         macro_rules! read_reg {
             ($src_riscv_reg:expr, $dst:expr) => {
                 if *$src_riscv_reg == RegAlias::Zero as u32 {
@@ -1243,6 +1257,8 @@ impl Emulator {
                         mov rbx, {target}
                         mov rax, rbx
                         shr rax, 2
+                        cmp rax, {lookup_table_len}
+                        jae .lookup_error
                         mov rax, [r9+8*rax]
                         test rax, rax
                         jz .lookup_error
@@ -1251,7 +1267,8 @@ impl Emulator {
                         xor rax, rax
                         ret
                     ",
-                    target = $target
+                    target = $target,
+                    lookup_table_len = lookup_table_len
                 )
             };
         }
