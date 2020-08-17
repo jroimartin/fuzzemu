@@ -1,5 +1,5 @@
-//! Emulated MMU with byte-level memory permissions able to detect unitialized
-//! memory accesses.
+//! Emulated MMU with byte-level memory permissions able to detect
+//! uninitialized memory accesses.
 
 use std::convert::TryInto;
 use std::fmt;
@@ -20,7 +20,7 @@ pub const PERM_READ: u8 = 1 << 2;
 /// This permission should be set when allocating writable memory. If a memory
 /// position has this flag and is written, the READ permission will be
 /// automatically assigned afterwards. This allows us to detect accesses to
-/// unitialized memory.
+/// uninitialized memory.
 pub const PERM_RAW: u8 = 1 << 3;
 
 /// Block size used for resetting and tracking memory which has been modified.
@@ -49,7 +49,7 @@ pub enum Error {
     /// Exec fault trying to execute non executable memory.
     ExecFault { addr: VirtAddr, size: usize },
 
-    /// Fault due to reading unitialized memory.
+    /// Fault due to reading uninitialized memory.
     UninitFault { addr: VirtAddr, size: usize },
 
     /// Unknown memory access error.
@@ -735,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn mmu_raw_unitialized() {
+    fn mmu_raw_uninit() {
         let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         mmu.set_perms(VirtAddr(0), 2, Perm(PERM_READ)).unwrap();
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
@@ -750,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn mmu_raw_not_allowed() {
+    fn mmu_raw_read_fault() {
         let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         mmu.set_perms(VirtAddr(0), 2, Perm(PERM_WRITE)).unwrap();
         mmu.set_perms(VirtAddr(2), 2, Perm(PERM_WRITE | PERM_RAW))
