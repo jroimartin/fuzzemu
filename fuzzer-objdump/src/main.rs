@@ -17,7 +17,7 @@ use riscv_emu::mmu::{
 const DEBUG: bool = false;
 
 /// If `true`, run one fuzz case using one thread and panic afterwards.
-const DEBUG_ONE: bool = false;
+const DEBUG_ONE: bool = true;
 
 /// If `true`, print stdout/stderr output.
 const DEBUG_OUTPUT: bool = false;
@@ -39,7 +39,7 @@ const STACK_SIZE: usize = 1024 * 1024;
 /// If `true`, allocate memory with WRITE|RAW permissions, so unitialized
 /// memory accesses are detected. Otherwise, allocate memory with WRITE|READ
 /// permissions.
-const CHECK_RAW: bool = false;
+const CHECK_RAW: bool = true;
 
 /// If `true`, execute the target program using JIT compilation.
 const USE_JIT: bool = true;
@@ -410,11 +410,12 @@ impl Fuzzer {
             return Ok(());
         }
 
+        let mut bytes = vec![0; count as usize];
+        self.emu.mmu().read(VirtAddr(buf as usize), &mut bytes)?;
+        let buf = String::from_utf8(bytes)
+            .unwrap_or_else(|_| String::from("(invalid string)"));
+
         if DEBUG_OUTPUT {
-            let mut bytes = vec![0; count as usize];
-            self.emu.mmu().read(VirtAddr(buf as usize), &mut bytes)?;
-            let buf = String::from_utf8(bytes)
-                .unwrap_or_else(|_| String::from("(invalid string)"));
             eprint!("{}", buf);
         }
 
