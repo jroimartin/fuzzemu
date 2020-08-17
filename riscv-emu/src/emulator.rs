@@ -504,9 +504,8 @@ impl Emulator {
                 Perm(PERM_EXEC),
             )?;
 
-            *inst_execed += 1;
-
             self.emulate_instruction(pc, inst)?;
+            *inst_execed += 1;
         }
     }
 
@@ -1024,21 +1023,28 @@ impl Emulator {
     /// # Calling convention
     ///
     /// Input:
-    /// - `r8`: number of executed instructions.
+    /// - `r8`: Number of executed instructions.
     /// - `r9`: JIT cache lookup table.
     /// - `r10`: Emulator registers.
-    /// - `r11`: Mmu memory.
-    /// - `r12`: Mmu dirty blocks.
-    /// - `r13`: Mmu dirty bitmap.
-    /// - `r14`: Mmu dirty length.
+    /// - `r11`: MMU memory.
+    /// - `r12`: MMU dirty blocks.
+    /// - `r13`: MMU dirty bitmap.
+    /// - `r14`: MMU dirty length.
+    /// - `r15`: MMU memory permissions.
     ///
     /// Output:
     /// - `rax`: JIT exit reason.
     ///   - `rax=0`: JIT cache lookup error.
-    ///   - `rax=1`: ECALL exception
-    ///   - `rax=2`: EBREAK exception
-    /// - `rbx`: Next PC. In the case of a exception (EBREAK, ECALL or fault),
-    ///   it's the address of the instruction causing the exception.
+    ///   - `rax=1`: ECALL exception.
+    ///   - `rax=2`: EBREAK exception.
+    ///   - `rax=3`: Read fault, `rcx`: Memory address, `rdx`: Size.
+    ///   - `rax=4`: Write fault, `rcx`: Memory address, `rdx`: Size.
+    ///   - `rax=5`: Uninit fault, `rcx`: Memory address, `rdx`: Size.
+    /// - `rbx`: Next PC. In the case of a exception (EBREAK, ECALL or
+    ///   read/write fault), it's the address of the instruction causing the
+    ///   exception.
+    /// - `rcx`: Extra information.
+    /// - `rdx`: Extra information.
     /// - `r8`: Updated number of executed instructions.
     /// - `r14`: Updated Mmu dirty len.
     pub fn run_jit(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
@@ -1075,9 +1081,12 @@ impl Emulator {
             let dirty_ptr = self.mmu.dirty_ptr();
             let dirty_bitmap_ptr = self.mmu.dirty_bitmap_ptr();
             let mut dirty_len = self.mmu.dirty_len();
+            let perms_ptr = self.mmu.perms_ptr();
 
             let jit_exit: u64;
             let next_pc: u64;
+            let rcx: u64;
+            let rdx: u64;
 
             unsafe {
                 asm!("call {block_ptr}",
@@ -1089,10 +1098,11 @@ impl Emulator {
                      in("r12") dirty_ptr,
                      in("r13") dirty_bitmap_ptr,
                      inout("r14") dirty_len,
+                     in("r15") perms_ptr,
                      out("rax") jit_exit,
                      out("rbx") next_pc,
-                     out("rcx") _,
-                     out("rdx") _,
+                     out("rcx") rcx,
+                     out("rdx") rdx,
                 );
             }
 
@@ -1123,6 +1133,24 @@ impl Emulator {
                 }
                 2 => {
                     return Err(VmExit::Ebreak);
+                }
+                3 => {
+                    return Err(VmExit::MmuError(mmu::Error::ReadFault {
+                        addr: VirtAddr(rcx as usize),
+                        size: rdx as usize,
+                    }));
+                }
+                4 => {
+                    return Err(VmExit::MmuError(mmu::Error::WriteFault {
+                        addr: VirtAddr(rcx as usize),
+                        size: rdx as usize,
+                    }));
+                }
+                5 => {
+                    return Err(VmExit::MmuError(mmu::Error::UninitFault {
+                        addr: VirtAddr(rcx as usize),
+                        size: rdx as usize,
+                    }));
                 }
                 _ => unimplemented!("unknown jit_exit value"),
             }
@@ -1359,14 +1387,14 @@ impl Emulator {
 
                 let offset = dec.imm as u64;
 
-                let (mov_inst, size, dst_reg) = match dec.funct3 {
-                    0b000 => ("movsx", "byte", "rax"),  // LB
-                    0b001 => ("movsx", "word", "rax"),  // LH
-                    0b010 => ("movsx", "dword", "rax"), // LW
-                    0b100 => ("movzx", "byte", "rax"),  // LBU
-                    0b101 => ("movzx", "word", "rax"),  // LHU
-                    0b110 => ("mov", "dword", "eax"),   // LWU
-                    0b011 => ("mov", "qword", "rax"),   // LD
+                let (mov_inst, size_mod, dst_reg, size) = match dec.funct3 {
+                    0b000 => ("movsx", "byte", "rax", 1), // LB
+                    0b001 => ("movsx", "word", "rax", 2), // LH
+                    0b010 => ("movsx", "dword", "rax", 4), // LW
+                    0b100 => ("movzx", "byte", "rax", 1), // LBU
+                    0b101 => ("movzx", "word", "rax", 2), // LHU
+                    0b110 => ("mov", "dword", "eax", 4),  // LWU
+                    0b011 => ("mov", "qword", "rax", 8),  // LD
                     _ => return Err(VmExit::InvalidInstruction),
                 };
 
@@ -1374,12 +1402,12 @@ impl Emulator {
                 code.push_str(&format!(
                     "
                         add rax, {offset}
-                        {mov_inst} {dst_reg}, {size} [r11+rax]
+                        {mov_inst} {dst_reg}, {size_mod} [r11+rax]
                     ",
                     offset = offset as i32,
                     mov_inst = mov_inst,
                     dst_reg = dst_reg,
-                    size = size
+                    size_mod = size_mod
                 ));
                 code.push_str(&write_reg!(dec.rd, "rax"));
             }

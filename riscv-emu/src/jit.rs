@@ -137,7 +137,7 @@ impl JitCache {
 
         // If the block does not exist, create a new mapping.
         if let Some(ptr) = self.jit_memory.dedup.get(&block) {
-            // If the dedup hash map contains the key, map the vaddr with the
+            // If the dedup hash map contains the key, map the address with the
             // already existing block.
             self.lookup_table[idx] = *ptr;
 

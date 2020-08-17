@@ -40,14 +40,24 @@ pub enum Error {
     /// Integer overflow when computing address.
     AddressIntegerOverflow { addr: VirtAddr, size: usize },
 
-    /// Read access to unitialized memory.
-    UnitializedMemory { addr: VirtAddr },
+    /// Read fault trying to read non readable memory.
+    ReadFault { addr: VirtAddr, size: usize },
 
-    /// Permissions do not allow memory access.
-    NotAllowed {
+    /// Write fault trying to write non writable memory.
+    WriteFault { addr: VirtAddr, size: usize },
+
+    /// Exec fault trying to execute non executable memory.
+    ExecFault { addr: VirtAddr, size: usize },
+
+    /// Fault due to reading unitialized memory.
+    UninitFault { addr: VirtAddr, size: usize },
+
+    /// Unknown memory access error.
+    UnkFault {
         addr: VirtAddr,
-        exp_perms: Perm,
-        cur_perms: Perm,
+        size: usize,
+        exp: Perm,
+        cur: Perm,
     },
 }
 
@@ -55,22 +65,32 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::InvalidAddress { addr, size } => {
-                write!(f, "invalid address: vaddr={} size={}", addr, size)
+                write!(f, "invalid address: addr={} size={}", addr, size)
             }
             Error::AddressIntegerOverflow { addr, size } => {
-                write!(f, "integer overflow: vaddr={} size={}", addr, size)
+                write!(f, "integer overflow: addr={} size={}", addr, size)
             }
-            Error::UnitializedMemory { addr } => {
-                write!(f, "unitialized memory: vaddr={}", addr)
+            Error::ReadFault { addr, size } => {
+                write!(f, "read fault: addr={} size={}", addr, size)
             }
-            Error::NotAllowed {
+            Error::WriteFault { addr, size } => {
+                write!(f, "write fault: addr={} size={}", addr, size)
+            }
+            Error::ExecFault { addr, size } => {
+                write!(f, "exec fault: addr={} size={}", addr, size)
+            }
+            Error::UninitFault { addr, size } => {
+                write!(f, "uninit fault: addr={} size={}", addr, size)
+            }
+            Error::UnkFault {
                 addr,
-                exp_perms,
-                cur_perms,
+                size,
+                exp,
+                cur,
             } => write!(
                 f,
-                "not allowed: vaddr={} exp={} cur={}",
-                addr, exp_perms, cur_perms
+                "unknown fault: addr={} size={} exp={} cur={}",
+                addr, size, exp, cur
             ),
         }
     }
@@ -211,6 +231,11 @@ impl Mmu {
         self.dirty.len()
     }
 
+    /// Returns the length of the internal memory buffer.
+    pub fn memory_len(&self) -> usize {
+        self.memory.len()
+    }
+
     /// Sets the length of the internal list of dirty blocks.
     ///
     /// # Safety
@@ -280,21 +305,28 @@ impl Mmu {
             .get(*addr..end)
             .ok_or(Error::InvalidAddress { addr, size })?;
 
-        for (i, p) in range.iter().enumerate() {
+        for p in range.iter() {
             // At this point, addr + size cannot overflow. Given that i < size,
             // checked_add is not needed.
             if (*perms & PERM_READ != 0) && (**p & PERM_RAW != 0) {
-                return Err(Error::UnitializedMemory {
-                    addr: VirtAddr(*addr + i),
-                });
+                return Err(Error::UninitFault { addr, size });
             }
 
             if **p & *perms != *perms {
-                return Err(Error::NotAllowed {
-                    addr: VirtAddr(*addr + i),
-                    exp_perms: perms,
-                    cur_perms: *p,
-                });
+                if *perms & PERM_READ != 0 {
+                    return Err(Error::ReadFault { addr, size });
+                } else if *perms & PERM_WRITE != 0 {
+                    return Err(Error::WriteFault { addr, size });
+                } else if *perms & PERM_EXEC != 0 {
+                    return Err(Error::ExecFault { addr, size });
+                } else {
+                    return Err(Error::UnkFault {
+                        addr,
+                        size,
+                        exp: perms,
+                        cur: *p,
+                    });
+                }
             }
         }
 
@@ -623,22 +655,46 @@ mod tests {
     }
 
     #[test]
-    fn mmu_write_not_allowed() {
+    fn mmu_write_fault() {
         let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
         match mmu.write(VirtAddr(0), &[1, 2, 3, 4]) {
-            Err(Error::NotAllowed { .. }) => return,
+            Err(Error::WriteFault { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
     }
 
     #[test]
-    fn mmu_read_not_allowed() {
+    fn mmu_read_fault() {
         let mmu = Mmu::new(DIRTY_BLOCK_SIZE);
 
         let mut tmp = [0u8; 2];
         match mmu.read(VirtAddr(0), &mut tmp) {
-            Err(Error::NotAllowed { .. }) => return,
+            Err(Error::ReadFault { .. }) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
+    }
+
+    #[test]
+    fn mmu_exec_exec_fault() {
+        let mmu = Mmu::new(DIRTY_BLOCK_SIZE);
+
+        let mut tmp = [0u8; 2];
+        match mmu.read_with_perms(VirtAddr(0), &mut tmp, Perm(PERM_EXEC)) {
+            Err(Error::ExecFault { .. }) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
+    }
+
+    #[test]
+    fn mmu_exec_unk_fault() {
+        let mmu = Mmu::new(DIRTY_BLOCK_SIZE);
+
+        let mut tmp = [0u8; 2];
+        match mmu.read_with_perms(VirtAddr(0), &mut tmp, Perm(1 << 7)) {
+            Err(Error::UnkFault { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
@@ -687,7 +743,7 @@ mod tests {
 
         let mut tmp = [0u8; 2];
         match mmu.read(VirtAddr(1), &mut tmp) {
-            Err(Error::UnitializedMemory { .. }) => return,
+            Err(Error::UninitFault { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
@@ -702,7 +758,7 @@ mod tests {
 
         let mut tmp = [0u8; 2];
         match mmu.read(VirtAddr(1), &mut tmp) {
-            Err(Error::NotAllowed { .. }) => return,
+            Err(Error::ReadFault { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
         }
