@@ -1403,30 +1403,27 @@ impl Emulator {
                         add rax, {offset}
                         {mov_inst} {size_mod} [r11+rax], {src_reg}
 
-                        ; Save rax
+                        ; Save rax.
                         mov rbx, rax
 
-                        ; Compute start block
-                        shr rax, {dirty_bs_shift}
-
-                        bts qword [r13], rax
-                        jc .end_block
-                        mov qword [r12+8*r14], rax
-                        inc r14
-
-                        ; Compute end block
-                        .end_block:
-                        mov rax, rbx
-                        add rax, {size}
-                        add rax, {dirty_bs}
-                        dec rax
-
+                        ; Be conservative and mark both the starting block and
+                        ; the next one as dirty. Computing if the second block
+                        ; is dirty is more expensive than resetting more
+                        ; memory blocks.
                         shr rax, {dirty_bs_shift}
 
                         bts qword [r13], rax
                         jc .out
+
+                        ; Mark starting block as dirty.
                         mov qword [r12+8*r14], rax
-                        inc r14
+                        add r14, 1
+
+                        ; Mark following block as dirty.
+                        add rax, 1
+                        bts qword [r13], rax
+                        mov qword [r12+8*r14], rax
+                        add r14, 1
 
                         .out:
                     ",
@@ -1434,8 +1431,6 @@ impl Emulator {
                     mov_inst = mov_inst,
                     size_mod = size_mod,
                     src_reg = src_reg,
-                    size = size,
-                    dirty_bs = DIRTY_BLOCK_SIZE,
                     dirty_bs_shift = dirty_bs_shift
                 ));
             }
@@ -1465,7 +1460,7 @@ impl Emulator {
                                 mov rbx, {imm}
                                 cmp rax, rbx
                                 jnl .out
-                                inc rcx
+                                add rcx, 1
                                 .out:
                             ",
                             imm = imm
@@ -1481,7 +1476,7 @@ impl Emulator {
                                 mov rbx, {imm}
                                 cmp rax, rbx
                                 jnb .out
-                                inc rcx
+                                add rcx, 1
                                 .out:
                             ",
                             imm = imm
@@ -1632,7 +1627,7 @@ impl Emulator {
                                         xor rcx, rcx
                                         cmp rax, rbx
                                         jnl .out
-                                        inc rcx
+                                        add rcx, 1
                                         .out:
                                     ",
                                 );
@@ -1652,7 +1647,7 @@ impl Emulator {
                                         xor rcx, rcx
                                         cmp rax, rbx
                                         jnb .out
-                                        inc rcx
+                                        add rcx, 1
                                         .out:
                                     ",
                                 );
