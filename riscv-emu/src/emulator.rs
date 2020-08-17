@@ -35,13 +35,6 @@ pub enum VmExit {
     JitError(jit::Error),
 }
 
-impl VmExit {
-    /// Returns true if the VmExit variant corresponds to a crash.
-    pub fn is_crash(&self) -> bool {
-        false
-    }
-}
-
 impl fmt::Display for VmExit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -1152,7 +1145,7 @@ impl Emulator {
                 Ok((inst_code, end)) => {
                     code.push_str(&format!(
                         "
-                            block_{cur_pc:x}:
+                            inst_{cur_pc:x}:
                             add r8, 1
 
                             {inst_code}
@@ -1176,8 +1169,6 @@ impl Emulator {
                 BITS 64
 
                 {code}
-
-                ret
             ",
             code = code
         );
@@ -1207,6 +1198,8 @@ impl Emulator {
 
         let mut code = String::new();
 
+        // Returns a `String` containing the asm code to write into a RISC-V
+        // register.
         macro_rules! write_reg {
             ($dst_riscv_reg:expr, $src:expr) => {
                 if *$dst_riscv_reg == RegAlias::Zero as u32 {
@@ -1221,6 +1214,8 @@ impl Emulator {
             };
         }
 
+        // Returns a `String` containing the asm code to read from a RISC-V
+        // register.
         macro_rules! read_reg {
             ($src_riscv_reg:expr, $dst:expr) => {
                 if *$src_riscv_reg == RegAlias::Zero as u32 {
@@ -1232,6 +1227,32 @@ impl Emulator {
                         riscv_reg = *$src_riscv_reg
                     )
                 }
+            };
+        }
+
+        // Returns a `String` containing the asm code to perform a jit cache
+        // lookup, jumping to the lifted block if found. Otherwise, it will
+        // exit the JIt with rax=0 and rbx=target.
+        //
+        // It clobbers the registers `rax` and `rbx` and uses the local label
+        // `.lookup_error`.
+        macro_rules! cache_lookup {
+            ($target:expr) => {
+                format!(
+                    "
+                        mov rbx, {target}
+                        mov rax, rbx
+                        shr rax, 2
+                        mov rax, [r9+8*rax]
+                        test rax, rax
+                        jz .lookup_error
+                        jmp rax
+                        .lookup_error:
+                        xor rax, rax
+                        ret
+                    ",
+                    target = $target
+                )
             };
         }
 
@@ -1258,20 +1279,7 @@ impl Emulator {
                 let offset = dec.imm as u64;
 
                 code.push_str(&write_reg!(dec.rd, pc.wrapping_add(4)));
-                code.push_str(&format!(
-                    "
-                        mov rbx, {target:#x}
-                        mov rax, rbx
-                        shr rax, 2
-                        mov rax, [r9+8*rax]
-                        test rax, rax
-                        jz .lookup_error
-                        jmp rax
-                        .lookup_error:
-                        xor rax, rax
-                    ",
-                    target = pc.wrapping_add(offset)
-                ));
+                code.push_str(&cache_lookup!(pc.wrapping_add(offset)));
 
                 return Ok((code, true));
             }
@@ -1284,22 +1292,16 @@ impl Emulator {
                     0b000 => {
                         // JALR
                         code.push_str(&write_reg!(dec.rd, pc.wrapping_add(4)));
-                        code.push_str(&read_reg!(dec.rs1, "rbx"));
+                        code.push_str(&read_reg!(dec.rs1, "rax"));
                         code.push_str(&format!(
                             "
-                                add rbx, {offset}
-                                shr rbx, 1
-                                shl rbx, 1
-                                mov rax, rbx
-                                shr rax, 2
-                                mov rax, [r9+8*rax]
-                                test rax, rax
-                                jz .lookup_error
-                                jmp rax
-                                .lookup_error:
-                                xor rax, rax
+                                add rax, {offset}
+                                shr rax, 1
+                                shl rax, 1
+                                {cache_lookup}
                             ",
-                            offset = offset as i32
+                            offset = offset as i32,
+                            cache_lookup = cache_lookup!("rax")
                         ));
 
                         return Ok((code, true));
@@ -1328,22 +1330,11 @@ impl Emulator {
                     "
                         cmp rcx, rdx
                         {cmp_inst} .out
-
-                        mov rbx, {target:#x}
-                        mov rax, rbx
-                        shr rax, 2
-                        mov rax, [r9+8*rax]
-                        test rax, rax
-                        jz .lookup_error
-                        jmp rax
-                        .lookup_error:
-                        xor rax, rax
-                        ret
-
+                        {cache_lookup}
                         .out:
                     ",
-                    target = pc.wrapping_add(offset),
-                    cmp_inst = cmp_inst
+                    cmp_inst = cmp_inst,
+                    cache_lookup = cache_lookup!(pc.wrapping_add(offset))
                 ));
             }
             0b0000011 => {
@@ -1750,6 +1741,7 @@ impl Emulator {
                             "
                                 mov rax, 1
                                 mov rbx, {pc:#x}
+                                ret
                             ",
                             pc = pc,
                         ));
@@ -1760,6 +1752,7 @@ impl Emulator {
                             "
                                 mov rax, 2
                                 mov rbx, {pc:#x}
+                                ret
                             ",
                             pc = pc,
                         ));

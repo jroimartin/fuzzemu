@@ -23,7 +23,7 @@ const DEBUG_ONE: bool = false;
 const DEBUG_OUTPUT: bool = false;
 
 /// Number of threads to spawn.
-const NUM_THREADS: usize = 8;
+const NUM_THREADS: usize = 1;
 
 /// Memory size of the VM.
 const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
@@ -243,7 +243,7 @@ impl Fuzzer {
                     eprintln!("[{:#010x}] {}\n{}", pc, vmexit, self.emu);
                 }
 
-                if vmexit.is_crash() {
+                if vmexit_is_crash(&vmexit) {
                     stats.crashes += 1;
                 }
             }
@@ -625,6 +625,11 @@ impl Fuzzer {
             )?;
         }
     }
+}
+
+/// Returns true if the VmExit variant corresponds to a crash.
+pub fn vmexit_is_crash(vmexit: &VmExit) -> bool {
+    false
 }
 
 /// Set up a stack with a size of `STACK_SIZE` bytes. It also configures
