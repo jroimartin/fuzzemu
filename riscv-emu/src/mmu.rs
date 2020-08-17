@@ -26,6 +26,9 @@ pub const PERM_RAW: u8 = 1 << 3;
 /// Block size used for resetting and tracking memory which has been modified.
 /// Memory is considered dirty after writing to it and after changing its
 /// permissions.
+///
+/// The block size must be a power of two. This is a requirement imposed by the
+/// JIT compiler.
 pub const DIRTY_BLOCK_SIZE: usize = 1024;
 
 /// Memory error.
@@ -201,6 +204,20 @@ impl Mmu {
             self.perms[start..end].copy_from_slice(&other.perms[start..end]);
         }
         self.dirty.clear();
+    }
+
+    /// Returns the length of the internal list of dirty blocks.
+    pub fn dirty_len(&self) -> usize {
+        self.dirty.len()
+    }
+
+    /// Sets the length of the internal list of dirty blocks.
+    ///
+    /// # Safety
+    ///
+    /// `new_len` must be less than or equal to the capacity of the dirty list.
+    pub unsafe fn set_dirty_len(&mut self, new_len: usize) {
+        self.dirty.set_len(new_len)
     }
 
     /// Returns a raw pointer to the internal memory buffer.

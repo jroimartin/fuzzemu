@@ -48,19 +48,17 @@ pub struct JitCache {
 /// Creates a memory map of size `size` with RWX permissions.
 ///
 /// TODO(rm): Port to other OS without mmap (i.e. MS Windows).
-fn alloc_rwx(size: usize) -> &'static mut [u8] {
-    unsafe {
-        let rwx_ptr = libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-            libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-            -1,
-            0,
-        );
+unsafe fn alloc_rwx(size: usize) -> &'static mut [u8] {
+    let rwx_ptr = libc::mmap(
+        std::ptr::null_mut(),
+        size,
+        libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+        libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+        -1,
+        0,
+    );
 
-        std::slice::from_raw_parts_mut(rwx_ptr as *mut u8, size)
-    }
+    std::slice::from_raw_parts_mut(rwx_ptr as *mut u8, size)
 }
 
 impl JitCache {
@@ -72,8 +70,10 @@ impl JitCache {
         // given that all the instructions in RISC-V rv64i are 4 bytes long.
         let size = exec_size / 4;
 
+        let rwx_map = unsafe { alloc_rwx(jit_size) };
+
         let jit_memory = JitMemory {
-            memory: alloc_rwx(jit_size),
+            memory: rwx_map,
             cursor: 0,
             dedup: HashMap::new(),
         };

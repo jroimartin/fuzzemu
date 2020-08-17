@@ -14,13 +14,13 @@ use riscv_emu::mmu::{
 };
 
 /// If `true`, print debug messages.
-const DEBUG: bool = true;
+const DEBUG: bool = false;
 
 /// If `true`, run one fuzz case using one thread and panic afterwards.
-const DEBUG_ONE: bool = true;
+const DEBUG_ONE: bool = false;
 
 /// If `true`, print stdout/stderr output.
-const DEBUG_OUTPUT: bool = true;
+const DEBUG_OUTPUT: bool = false;
 
 /// Number of threads to spawn.
 const NUM_THREADS: usize = 8;
@@ -719,14 +719,16 @@ fn main() {
 
     // Show statistics in the main thread.
     let mut last_fuzz_cases = 0;
+    let mut last_total_inst = 0;
     loop {
         thread::sleep(Duration::from_millis(1000));
 
         let stats = stats.lock().unwrap();
 
         let elapsed = start.elapsed().as_secs_f64();
-        let fcps_last = stats.fuzz_cases - last_fuzz_cases;
+        let last_fcps = stats.fuzz_cases - last_fuzz_cases;
         let fcps = stats.fuzz_cases as f64 / elapsed;
+        let last_instps = stats.total_inst - last_total_inst;
         let instps = stats.total_inst as f64 / elapsed;
         let vm_time = stats.vm_cycles as f64 / stats.total_cycles as f64;
         let reset_time = stats.reset_cycles as f64 / stats.total_cycles as f64;
@@ -734,14 +736,15 @@ fn main() {
             stats.syscall_cycles as f64 / stats.total_cycles as f64;
 
         println!(
-            "[{:10.4}] cases {:10} | fcps (last) {:10.1} | fcps {:10.1} | \
-            {:10.1} inst/s | crashes {:5} | vm {:6.4} | reset {:6.4} | \
-            syscall {:6.4}",
+            "[{:10.4}] cases {:10} | fcps (last) {:10.0} | fcps {:10.1} | \
+            Minst/s (last) {:10.0}| Minst/s {:10.1} | crashes {:5} | \
+            vm {:6.4} | reset {:6.4} | syscall {:6.4}",
             elapsed,
             stats.fuzz_cases,
-            fcps_last,
+            last_fcps,
             fcps,
-            instps,
+            last_instps as f64 / 1e6,
+            instps / 1e6,
             stats.crashes,
             vm_time,
             reset_time,
@@ -749,5 +752,6 @@ fn main() {
         );
 
         last_fuzz_cases = stats.fuzz_cases;
+        last_total_inst = stats.total_inst;
     }
 }

@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::elf::{self, Elf};
 use crate::jit::{self, JitCache};
-use crate::mmu::{self, Mmu, Perm, VirtAddr, PERM_EXEC};
+use crate::mmu::{self, Mmu, Perm, VirtAddr, DIRTY_BLOCK_SIZE, PERM_EXEC};
 
 /// Print debug messages.
-const DEBUG: bool = true;
+const DEBUG: bool = false;
 
 /// Emulator's exit reason.
 #[derive(Debug)]
@@ -705,19 +705,19 @@ impl Emulator {
 
                 match dec.funct3 {
                     0b000 => {
-                        //SB
+                        // SB
                         self.mmu.write_int::<u8>(vaddr, rs2 as u8)?;
                     }
                     0b001 => {
-                        //SH
+                        // SH
                         self.mmu.write_int::<u16>(vaddr, rs2 as u16)?;
                     }
                     0b010 => {
-                        //SW
+                        // SW
                         self.mmu.write_int::<u32>(vaddr, rs2 as u32)?;
                     }
                     0b011 => {
-                        //SD
+                        // SD
                         self.mmu.write_int::<u64>(vaddr, rs2)?;
                     }
                     _ => return Err(VmExit::InvalidInstruction),
@@ -1035,15 +1035,19 @@ impl Emulator {
     ///   r9: JIT cache lookup table
     ///   r10: Emulator registers
     ///   r11: Mmu memory
+    ///   r12: Mmu dirty blocks
+    ///   r13: Mmu dirty bitmap
+    ///   r14: Mmu dirty len
     ///
     /// Output:
     ///   rax: jit exit reason
     ///     rax=0: JIT cache lookup error
     ///     rax=1: ECALL exception
     ///     rax=2: EBREAK exception
-    ///   rbx: next PC. In the case of ECALL and EBREAK, the address of that
-    ///        instruction
-    ///   r8: number of executed instructions
+    ///   rbx: next PC. In the case of ECALL and EBREAK, it's the address of
+    ///     the instruction.
+    ///   r8: updated number of executed instructions
+    ///   r14: updated Mmu dirty len
     pub fn run_jit(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
         let mut pc = self.reg(RegAlias::Pc)?;
 
@@ -1072,6 +1076,9 @@ impl Emulator {
 
             let regs_ptr = self.regs.as_ptr();
             let memory_ptr = self.mmu.memory_ptr();
+            let dirty_ptr = self.mmu.dirty_ptr();
+            let dirty_bitmap_ptr = self.mmu.dirty_bitmap_ptr();
+            let mut dirty_len = self.mmu.dirty_len();
 
             let jit_exit: u64;
             let next_pc: u64;
@@ -1083,6 +1090,9 @@ impl Emulator {
                      in("r9") lookup_table_ptr,
                      in("r10") regs_ptr,
                      in("r11") memory_ptr,
+                     in("r12") dirty_ptr,
+                     in("r13") dirty_bitmap_ptr,
+                     inout("r14") dirty_len,
                      out("rax") jit_exit,
                      out("rbx") next_pc,
                      out("rcx") _,
@@ -1090,16 +1100,22 @@ impl Emulator {
                 );
             }
 
+            if DEBUG {
+                eprintln!(
+                    "jit_exit={:#x} next_pc={:#x} inst_execed={} dirty_len={}",
+                    jit_exit, next_pc, inst_execed, dirty_len
+                );
+            }
+
+            // Update the length of the list of dirty blocks with the new
+            // value.
+            unsafe {
+                self.mmu.set_dirty_len(dirty_len);
+            }
+
             // Update the PC register with the next PC. Needed by exception
             // handlers and debug messages.
             self.set_reg(RegAlias::Pc, next_pc)?;
-
-            if DEBUG {
-                eprintln!(
-                    "jit_exit={:#x} next_pc={:#x} inst_execed={}",
-                    jit_exit, next_pc, inst_execed
-                );
-            }
 
             match jit_exit {
                 0 => {
@@ -1120,7 +1136,6 @@ impl Emulator {
     /// Lifts a basic block.
     fn lift_block(&mut self, pc: u64) -> Result<Vec<u8>, VmExit> {
         let mut code = String::new();
-        let mut num_inst = 0;
         let mut cur_pc = pc;
 
         if DEBUG {
@@ -1135,10 +1150,18 @@ impl Emulator {
 
             match self.lift_instruction(cur_pc, inst) {
                 Ok((inst_code, end)) => {
-                    code.push_str(&inst_code);
+                    code.push_str(&format!(
+                        "
+                            block_{cur_pc:x}:
+                            add r8, 1
+
+                            {inst_code}
+                        ",
+                        cur_pc = cur_pc,
+                        inst_code = inst_code
+                    ));
 
                     cur_pc = cur_pc.wrapping_add(4);
-                    num_inst += 1;
 
                     if end {
                         break;
@@ -1152,15 +1175,10 @@ impl Emulator {
             "
                 BITS 64
 
-                block_{pc:x}:
-                add r8, {num_inst}
-
                 {code}
 
                 ret
             ",
-            pc = pc,
-            num_inst = num_inst,
             code = code
         );
 
@@ -1247,13 +1265,12 @@ impl Emulator {
                         shr rax, 2
                         mov rax, [r9+8*rax]
                         test rax, rax
-                        jz .lookup_error_{pc:x}
+                        jz .lookup_error
                         jmp rax
-                        .lookup_error_{pc:x}:
+                        .lookup_error:
                         xor rax, rax
                     ",
-                    target = pc.wrapping_add(offset),
-                    pc = pc
+                    target = pc.wrapping_add(offset)
                 ));
 
                 return Ok((code, true));
@@ -1277,13 +1294,12 @@ impl Emulator {
                                 shr rax, 2
                                 mov rax, [r9+8*rax]
                                 test rax, rax
-                                jz .lookup_error_{pc:x}
+                                jz .lookup_error
                                 jmp rax
-                                .lookup_error_{pc:x}:
+                                .lookup_error:
                                 xor rax, rax
                             ",
-                            offset = offset as i32,
-                            pc = pc
+                            offset = offset as i32
                         ));
 
                         return Ok((code, true));
@@ -1311,24 +1327,23 @@ impl Emulator {
                 code.push_str(&format!(
                     "
                         cmp rcx, rdx
-                        {cmp_inst} .out_{pc:x}
+                        {cmp_inst} .out
 
                         mov rbx, {target:#x}
                         mov rax, rbx
                         shr rax, 2
                         mov rax, [r9+8*rax]
                         test rax, rax
-                        jz .lookup_error_{pc:x}
+                        jz .lookup_error
                         jmp rax
-                        .lookup_error_{pc:x}:
+                        .lookup_error:
                         xor rax, rax
                         ret
 
-                        .out_{pc:x}:
+                        .out:
                     ",
                     target = pc.wrapping_add(offset),
-                    cmp_inst = cmp_inst,
-                    pc = pc
+                    cmp_inst = cmp_inst
                 ));
             }
             0b0000011 => {
@@ -1365,25 +1380,63 @@ impl Emulator {
 
                 let offset = dec.imm as u64;
 
-                let (mov_inst, size, src_reg) = match dec.funct3 {
-                    0b000 => ("mov", "byte", "bl"),   // SB
-                    0b001 => ("mov", "word", "bx"),   // SH
-                    0b010 => ("mov", "dword", "ebx"), // SW
-                    0b011 => ("mov", "qword", "rbx"), // SD
+                let (mov_inst, size_mod, src_reg, size) = match dec.funct3 {
+                    0b000 => ("mov", "byte", "bl", 1),   // SB
+                    0b001 => ("mov", "word", "bx", 2),   // SH
+                    0b010 => ("mov", "dword", "ebx", 3), // SW
+                    0b011 => ("mov", "qword", "rbx", 4), // SD
                     _ => return Err(VmExit::InvalidInstruction),
                 };
+
+                // Check DIRTY_BLOCK_SIZE fits the requirements.
+                assert_eq!(
+                    DIRTY_BLOCK_SIZE.count_ones(),
+                    1,
+                    "DIRTY_BLOCK_SIZE must be a power of two"
+                );
+                let dirty_bs_shift = DIRTY_BLOCK_SIZE.trailing_zeros();
 
                 code.push_str(&read_reg!(dec.rs1, "rax"));
                 code.push_str(&read_reg!(dec.rs2, "rbx"));
                 code.push_str(&format!(
                     "
                         add rax, {offset}
-                        {mov_inst} {size} [r11+rax], {src_reg}
+                        {mov_inst} {size_mod} [r11+rax], {src_reg}
+
+                        ; Save rax
+                        mov rbx, rax
+
+                        ; Compute start block
+                        shr rax, {dirty_bs_shift}
+
+                        bts qword [r13], rax
+                        jc .end_block
+                        mov qword [r12+8*r14], rax
+                        inc r14
+
+                        ; Compute end block
+                        .end_block:
+                        mov rax, rbx
+                        add rax, {size}
+                        add rax, {dirty_bs}
+                        dec rax
+
+                        shr rax, {dirty_bs_shift}
+
+                        bts qword [r13], rax
+                        jc .out
+                        mov qword [r12+8*r14], rax
+                        inc r14
+
+                        .out:
                     ",
                     offset = offset as i32,
                     mov_inst = mov_inst,
+                    size_mod = size_mod,
+                    src_reg = src_reg,
                     size = size,
-                    src_reg = src_reg
+                    dirty_bs = DIRTY_BLOCK_SIZE,
+                    dirty_bs_shift = dirty_bs_shift
                 ));
             }
             0b0010011 => {
@@ -1411,12 +1464,11 @@ impl Emulator {
                                 xor rcx, rcx
                                 mov rbx, {imm}
                                 cmp rax, rbx
-                                jnl .out_{pc:x}
+                                jnl .out
                                 inc rcx
-                                .out_{pc:x}:
+                                .out:
                             ",
-                            imm = imm,
-                            pc = pc
+                            imm = imm
                         ));
                         code.push_str(&write_reg!(dec.rd, "rcx"));
                     }
@@ -1428,12 +1480,11 @@ impl Emulator {
                                 xor rcx, rcx
                                 mov rbx, {imm}
                                 cmp rax, rbx
-                                jnb .out_{pc:x}
+                                jnb .out
                                 inc rcx
-                                .out_{pc:x}:
+                                .out:
                             ",
-                            imm = imm,
-                            pc = pc
+                            imm = imm
                         ));
                         code.push_str(&write_reg!(dec.rd, "rcx"));
                     }
@@ -1576,16 +1627,15 @@ impl Emulator {
                                 // SLT
                                 code.push_str(&read_reg!(dec.rs1, "rax"));
                                 code.push_str(&read_reg!(dec.rs2, "rbx"));
-                                code.push_str(&format!(
+                                code.push_str(
                                     "
                                         xor rcx, rcx
                                         cmp rax, rbx
-                                        jnl .out_{pc:x}
+                                        jnl .out
                                         inc rcx
-                                        .out_{pc:x}:
+                                        .out:
                                     ",
-                                    pc = pc
-                                ));
+                                );
                                 code.push_str(&write_reg!(dec.rd, "rcx"));
                             }
                             _ => return Err(VmExit::InvalidInstruction),
@@ -1597,16 +1647,15 @@ impl Emulator {
                                 // SLTU
                                 code.push_str(&read_reg!(dec.rs1, "rax"));
                                 code.push_str(&read_reg!(dec.rs2, "rbx"));
-                                code.push_str(&format!(
+                                code.push_str(
                                     "
                                         xor rcx, rcx
                                         cmp rax, rbx
-                                        jnb .out_{pc:x}
+                                        jnb .out
                                         inc rcx
-                                        .out_{pc:x}:
+                                        .out:
                                     ",
-                                    pc = pc
-                                ));
+                                );
                                 code.push_str(&write_reg!(dec.rd, "rcx"));
                             }
                             _ => return Err(VmExit::InvalidInstruction),
