@@ -3,7 +3,7 @@
 use std::fmt;
 use std::fs;
 use std::io;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// NASM assembler instance.
 pub struct Nasm {
@@ -56,8 +56,6 @@ impl Nasm {
                 output_file.to_str().ok_or(Error::CommandFailed)?,
                 input_file.to_str().ok_or(Error::CommandFailed)?,
             ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .status()?;
 
         if !status.success() {

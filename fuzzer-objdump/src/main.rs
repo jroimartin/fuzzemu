@@ -17,7 +17,7 @@ use riscv_emu::mmu::{
 const DEBUG: bool = false;
 
 /// If `true`, run one fuzz case using one thread and panic afterwards.
-const DEBUG_ONE: bool = true;
+const DEBUG_ONE: bool = false;
 
 /// If `true`, print stdout/stderr output.
 const DEBUG_OUTPUT: bool = false;
@@ -39,7 +39,7 @@ const STACK_SIZE: usize = 1024 * 1024;
 /// If `true`, allocate memory with WRITE|RAW permissions, so unitialized
 /// memory accesses are detected. Otherwise, allocate memory with WRITE|READ
 /// permissions.
-const CHECK_RAW: bool = true;
+const CHECK_RAW: bool = false;
 
 /// If `true`, execute the target program using JIT compilation.
 const USE_JIT: bool = true;

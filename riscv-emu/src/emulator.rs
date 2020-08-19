@@ -11,7 +11,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::elf::{self, Elf};
 use crate::jit::{self, JitCache};
-use crate::mmu::{self, Mmu, Perm, VirtAddr, DIRTY_BLOCK_SIZE, PERM_EXEC};
+use crate::mmu::{
+    self, Mmu, Perm, VirtAddr, DIRTY_BLOCK_SIZE, PERM_EXEC, PERM_RAW,
+    PERM_READ, PERM_WRITE,
+};
 
 /// Print debug messages.
 const DEBUG: bool = false;
@@ -563,7 +566,7 @@ impl Emulator {
                         )?;
                         return Ok(());
                     }
-                    _ => return Err(VmExit::UnimplementedInstruction),
+                    _ => return Err(VmExit::InvalidInstruction),
                 }
             }
             0b1100011 => {
@@ -1351,7 +1354,7 @@ impl Emulator {
 
                         return Ok((code, true));
                     }
-                    _ => return Err(VmExit::UnimplementedInstruction),
+                    _ => return Err(VmExit::InvalidInstruction),
                 }
             }
             0b1100011 => {
@@ -1387,27 +1390,82 @@ impl Emulator {
 
                 let offset = dec.imm as u64;
 
-                let (mov_inst, size_mod, dst_reg, size) = match dec.funct3 {
-                    0b000 => ("movsx", "byte", "rax", 1), // LB
-                    0b001 => ("movsx", "word", "rax", 2), // LH
-                    0b010 => ("movsx", "dword", "rax", 4), // LW
-                    0b100 => ("movzx", "byte", "rax", 1), // LBU
-                    0b101 => ("movzx", "word", "rax", 2), // LHU
-                    0b110 => ("mov", "dword", "eax", 4),  // LWU
-                    0b011 => ("mov", "qword", "rax", 8),  // LD
+                let (
+                    mov_inst,
+                    movzx_inst,
+                    size_mod,
+                    rax_reg,
+                    movzx_rax_reg,
+                    size,
+                ) = match dec.funct3 {
+                    0b000 => ("movsx", "movzx", "byte", "rax", "rax", 1), // LB
+                    0b001 => ("movsx", "movzx", "word", "rax", "rax", 2), // LH
+                    0b010 => ("movsx", "mov", "dword", "rax", "eax", 4),  // LW
+                    0b100 => ("movzx", "movzx", "byte", "rax", "rax", 1), // LBU
+                    0b101 => ("movzx", "movzx", "word", "rax", "rax", 2), // LHU
+                    0b110 => ("mov", "mov", "dword", "eax", "eax", 4), // LWU
+                    0b011 => ("mov", "mov", "qword", "rax", "rax", 8), // LD
                     _ => return Err(VmExit::InvalidInstruction),
                 };
 
-                code.push_str(&read_reg!(dec.rs1, "rax"));
+                let mut read_mask = 0u64;
+                let mut raw_mask = 0u64;
+                for i in 0..size {
+                    read_mask |= (PERM_READ as u64) << i * 8;
+                    raw_mask |= (PERM_RAW as u64) << i * 8;
+                }
+
+                code.push_str(&read_reg!(dec.rs1, "rcx"));
                 code.push_str(&format!(
                     "
-                        add rax, {offset}
-                        {mov_inst} {dst_reg}, {size_mod} [r11+rax]
+                        add rcx, {offset}
+
+                        ; Check memory boundaries.
+                        cmp rcx, {memory_len} - {size}
+                        ja .read_fault
+
+                        ; Check uninit.
+                        {movzx_inst} {movzx_rax_reg}, {size_mod} [r15+rcx]
+                        mov rbx, {raw_mask}
+                        and rax, rbx
+                        jnz .uninit_fault
+
+                        ; Check unreadable.
+                        {movzx_inst} {movzx_rax_reg}, {size_mod} [r15+rcx]
+                        mov rbx, {read_mask}
+                        and rax, rbx
+                        cmp rax, rbx
+                        jne .read_fault
+
+                        ; Read.
+                        {mov_inst} {rax_reg}, {size_mod} [r11+rcx]
+                        jmp .out
+
+                        .uninit_fault:
+                        mov rax, 5
+                        mov rbx, {pc}
+                        mov rdx, {size}
+                        ret
+
+                        .read_fault:
+                        mov rax, 3
+                        mov rbx, {pc}
+                        mov rdx, {size}
+                        ret
+
+                        .out:
                     ",
                     offset = offset as i32,
                     mov_inst = mov_inst,
-                    dst_reg = dst_reg,
-                    size_mod = size_mod
+                    movzx_inst = movzx_inst,
+                    rax_reg = rax_reg,
+                    movzx_rax_reg = movzx_rax_reg,
+                    size_mod = size_mod,
+                    size = size,
+                    memory_len = self.mmu.memory_len(),
+                    pc = pc,
+                    read_mask = read_mask,
+                    raw_mask = raw_mask
                 ));
                 code.push_str(&write_reg!(dec.rd, "rax"));
             }
@@ -1416,13 +1474,21 @@ impl Emulator {
 
                 let offset = dec.imm as u64;
 
-                let (mov_inst, size_mod, src_reg, size) = match dec.funct3 {
-                    0b000 => ("mov", "byte", "bl", 1),   // SB
-                    0b001 => ("mov", "word", "bx", 2),   // SH
-                    0b010 => ("mov", "dword", "ebx", 3), // SW
-                    0b011 => ("mov", "qword", "rbx", 4), // SD
-                    _ => return Err(VmExit::InvalidInstruction),
-                };
+                let (movzx_inst, size_mod, movzx_rax_reg, a_reg, size) =
+                    match dec.funct3 {
+                        0b000 => ("movzx", "byte", "rax", "al", 1), // SB
+                        0b001 => ("movzx", "word", "rax", "ax", 2), // SH
+                        0b010 => ("mov", "dword", "eax", "eax", 4), // SW
+                        0b011 => ("mov", "qword", "rax", "rax", 8), // SD
+                        _ => return Err(VmExit::InvalidInstruction),
+                    };
+
+                let mut write_mask = 0u64;
+                let mut raw_mask = 0u64;
+                for i in 0..size {
+                    write_mask |= (PERM_WRITE as u64) << i * 8;
+                    raw_mask |= (PERM_RAW as u64) << i * 8;
+                }
 
                 // Check DIRTY_BLOCK_SIZE fits the requirements.
                 assert_eq!(
@@ -1432,42 +1498,81 @@ impl Emulator {
                 );
                 let dirty_bs_shift = DIRTY_BLOCK_SIZE.trailing_zeros();
 
-                code.push_str(&read_reg!(dec.rs1, "rax"));
-                code.push_str(&read_reg!(dec.rs2, "rbx"));
+                code.push_str(&read_reg!(dec.rs1, "rcx"));
+                code.push_str(&read_reg!(dec.rs2, "rax"));
                 code.push_str(&format!(
                     "
-                        add rax, {offset}
-                        {mov_inst} {size_mod} [r11+rax], {src_reg}
-
-                        ; Save rax.
+                        ; Save rax, we'll clobber it while checking perms.
                         mov rbx, rax
+
+                        add rcx, {offset}
+
+                        ; Check memory boundaries.
+                        cmp rcx, {memory_len} - {size}
+                        ja .fault
+
+                        ; Check write.
+                        {movzx_inst} {movzx_rax_reg}, {size_mod} [r15+rcx]
+                        mov rdx, {write_mask}
+                        and rax, rdx
+                        cmp rax, rdx
+                        jne .fault
+
+                        ; Remove PERM_RAW and add PERM_READ.
+                        {movzx_inst} {movzx_rax_reg}, {size_mod} [r15+rcx]
+                        mov rdx, {raw_mask}
+                        and rdx, rax
+                        xor rax, rdx
+                        shr rdx, 1
+                        or rax, rdx
+                        mov {size_mod} [r15+rcx], {a_reg}
+
+                        ; Restore rax and write.
+                        mov rax, rbx
+                        mov {size_mod} [r11+rcx], {a_reg}
 
                         ; Be conservative and mark both the starting block and
                         ; the next one as dirty. Computing if the second block
                         ; is dirty is more expensive than resetting more
                         ; memory blocks.
-                        shr rax, {dirty_bs_shift}
+                        shr rcx, {dirty_bs_shift}
 
-                        bts qword [r13], rax
-                        jc .out
+                        bts qword [r13], rcx
+                        jc .next_block
 
                         ; Mark starting block as dirty.
-                        mov qword [r12+8*r14], rax
+                        mov qword [r12+8*r14], rcx
                         add r14, 1
 
+                        .next_block:
+
                         ; Mark following block as dirty.
-                        add rax, 1
-                        bts qword [r13], rax
-                        mov qword [r12+8*r14], rax
+                        add rcx, 1
+                        bts qword [r13], rcx
+                        jc .out
+                        mov qword [r12+8*r14], rcx
                         add r14, 1
+                        jmp .out
+
+                        .fault:
+                        mov rax, 4
+                        mov rbx, {pc}
+                        mov rdx, {size}
+                        ret
 
                         .out:
                     ",
                     offset = offset as i32,
-                    mov_inst = mov_inst,
+                    movzx_inst = movzx_inst,
                     size_mod = size_mod,
-                    src_reg = src_reg,
-                    dirty_bs_shift = dirty_bs_shift
+                    size = size,
+                    memory_len = self.mmu.memory_len(),
+                    movzx_rax_reg = movzx_rax_reg,
+                    a_reg = a_reg,
+                    dirty_bs_shift = dirty_bs_shift,
+                    write_mask = write_mask,
+                    raw_mask = raw_mask,
+                    pc = pc
                 ));
             }
             0b0010011 => {
