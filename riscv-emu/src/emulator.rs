@@ -1390,23 +1390,17 @@ impl Emulator {
 
                 let offset = dec.imm as u64;
 
-                let (
-                    mov_inst,
-                    movzx_inst,
-                    size_mod,
-                    rax_reg,
-                    movzx_rax_reg,
-                    size,
-                ) = match dec.funct3 {
-                    0b000 => ("movsx", "movzx", "byte", "rax", "rax", 1), // LB
-                    0b001 => ("movsx", "movzx", "word", "rax", "rax", 2), // LH
-                    0b010 => ("movsx", "mov", "dword", "rax", "eax", 4),  // LW
-                    0b100 => ("movzx", "movzx", "byte", "rax", "rax", 1), // LBU
-                    0b101 => ("movzx", "movzx", "word", "rax", "rax", 2), // LHU
-                    0b110 => ("mov", "mov", "dword", "eax", "eax", 4), // LWU
-                    0b011 => ("mov", "mov", "qword", "rax", "rax", 8), // LD
-                    _ => return Err(VmExit::InvalidInstruction),
-                };
+                let (mov, movzx, size_mod, rax, movzx_rax, size) =
+                    match dec.funct3 {
+                        0b000 => ("movsx", "movzx", "byte", "rax", "rax", 1), // LB
+                        0b001 => ("movsx", "movzx", "word", "rax", "rax", 2), // LH
+                        0b010 => ("movsx", "mov", "dword", "rax", "eax", 4), // LW
+                        0b100 => ("movzx", "movzx", "byte", "rax", "rax", 1), // LBU
+                        0b101 => ("movzx", "movzx", "word", "rax", "rax", 2), // LHU
+                        0b110 => ("mov", "mov", "dword", "eax", "eax", 4), // LWU
+                        0b011 => ("mov", "mov", "qword", "rax", "rax", 8), // LD
+                        _ => return Err(VmExit::InvalidInstruction),
+                    };
 
                 let mut read_mask = 0u64;
                 let mut raw_mask = 0u64;
@@ -1425,20 +1419,20 @@ impl Emulator {
                         ja .read_fault
 
                         ; Check uninit.
-                        {movzx_inst} {movzx_rax_reg}, {size_mod} [r15+rcx]
+                        {movzx} {movzx_rax}, {size_mod} [r15+rcx]
                         mov rbx, {raw_mask}
                         and rax, rbx
                         jnz .uninit_fault
 
                         ; Check unreadable.
-                        {movzx_inst} {movzx_rax_reg}, {size_mod} [r15+rcx]
+                        {movzx} {movzx_rax}, {size_mod} [r15+rcx]
                         mov rbx, {read_mask}
                         and rax, rbx
                         cmp rax, rbx
                         jne .read_fault
 
                         ; Read.
-                        {mov_inst} {rax_reg}, {size_mod} [r11+rcx]
+                        {mov} {rax}, {size_mod} [r11+rcx]
                         jmp .out
 
                         .uninit_fault:
@@ -1455,17 +1449,17 @@ impl Emulator {
 
                         .out:
                     ",
-                    offset = offset as i32,
-                    mov_inst = mov_inst,
-                    movzx_inst = movzx_inst,
-                    rax_reg = rax_reg,
-                    movzx_rax_reg = movzx_rax_reg,
+                    mov = mov,
+                    movzx = movzx,
                     size_mod = size_mod,
+                    rax = rax,
+                    movzx_rax = movzx_rax,
                     size = size,
+                    offset = offset as i32,
                     memory_len = self.mmu.memory_len(),
-                    pc = pc,
                     read_mask = read_mask,
-                    raw_mask = raw_mask
+                    raw_mask = raw_mask,
+                    pc = pc
                 ));
                 code.push_str(&write_reg!(dec.rd, "rax"));
             }
@@ -1474,10 +1468,10 @@ impl Emulator {
 
                 let offset = dec.imm as u64;
 
-                let (movzx_inst, size_mod, movzx_rax_reg, a_reg, size) =
+                let (movzx, size_mod, rax, movzx_rax, size) =
                     match dec.funct3 {
-                        0b000 => ("movzx", "byte", "rax", "al", 1), // SB
-                        0b001 => ("movzx", "word", "rax", "ax", 2), // SH
+                        0b000 => ("movzx", "byte", "al", "rax", 1), // SB
+                        0b001 => ("movzx", "word", "ax", "rax", 2), // SH
                         0b010 => ("mov", "dword", "eax", "eax", 4), // SW
                         0b011 => ("mov", "qword", "rax", "rax", 8), // SD
                         _ => return Err(VmExit::InvalidInstruction),
@@ -1512,24 +1506,24 @@ impl Emulator {
                         ja .fault
 
                         ; Check write.
-                        {movzx_inst} {movzx_rax_reg}, {size_mod} [r15+rcx]
+                        {movzx} {movzx_rax}, {size_mod} [r15+rcx]
                         mov rdx, {write_mask}
                         and rax, rdx
                         cmp rax, rdx
                         jne .fault
 
                         ; Remove PERM_RAW and add PERM_READ.
-                        {movzx_inst} {movzx_rax_reg}, {size_mod} [r15+rcx]
+                        {movzx} {movzx_rax}, {size_mod} [r15+rcx]
                         mov rdx, {raw_mask}
                         and rdx, rax
                         xor rax, rdx
                         shr rdx, 1
                         or rax, rdx
-                        mov {size_mod} [r15+rcx], {a_reg}
+                        mov {size_mod} [r15+rcx], {rax}
 
                         ; Restore rax and write.
                         mov rax, rbx
-                        mov {size_mod} [r11+rcx], {a_reg}
+                        mov {size_mod} [r11+rcx], {rax}
 
                         ; Be conservative and mark both the starting block and
                         ; the next one as dirty. Computing if the second block
@@ -1562,13 +1556,13 @@ impl Emulator {
 
                         .out:
                     ",
-                    offset = offset as i32,
-                    movzx_inst = movzx_inst,
+                    movzx= movzx,
                     size_mod = size_mod,
+                    rax = rax,
+                    movzx_rax= movzx_rax,
                     size = size,
+                    offset = offset as i32,
                     memory_len = self.mmu.memory_len(),
-                    movzx_rax_reg = movzx_rax_reg,
-                    a_reg = a_reg,
                     dirty_bs_shift = dirty_bs_shift,
                     write_mask = write_mask,
                     raw_mask = raw_mask,
