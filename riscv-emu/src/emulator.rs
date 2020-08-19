@@ -1468,14 +1468,14 @@ impl Emulator {
 
                 let offset = dec.imm as u64;
 
-                let (movzx, size_mod, rax, movzx_rax, size) =
-                    match dec.funct3 {
-                        0b000 => ("movzx", "byte", "al", "rax", 1), // SB
-                        0b001 => ("movzx", "word", "ax", "rax", 2), // SH
-                        0b010 => ("mov", "dword", "eax", "eax", 4), // SW
-                        0b011 => ("mov", "qword", "rax", "rax", 8), // SD
-                        _ => return Err(VmExit::InvalidInstruction),
-                    };
+                let (movzx, size_mod, rax, movzx_rax, size) = match dec.funct3
+                {
+                    0b000 => ("movzx", "byte", "al", "rax", 1), // SB
+                    0b001 => ("movzx", "word", "ax", "rax", 2), // SH
+                    0b010 => ("mov", "dword", "eax", "eax", 4), // SW
+                    0b011 => ("mov", "qword", "rax", "rax", 8), // SD
+                    _ => return Err(VmExit::InvalidInstruction),
+                };
 
                 let mut write_mask = 0u64;
                 let mut raw_mask = 0u64;
@@ -1556,10 +1556,10 @@ impl Emulator {
 
                         .out:
                     ",
-                    movzx= movzx,
+                    movzx = movzx,
                     size_mod = size_mod,
                     rax = rax,
-                    movzx_rax= movzx_rax,
+                    movzx_rax = movzx_rax,
                     size = size,
                     offset = offset as i32,
                     memory_len = self.mmu.memory_len(),
