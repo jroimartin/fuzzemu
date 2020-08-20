@@ -20,6 +20,9 @@ use crate::mmu::{
 /// Print debug messages.
 const DEBUG: bool = false;
 
+/// Maximum number of instructions to execute before returning a timeout.
+const TIMEOUT: u64 = 100_000_000;
+
 /// Emulator's exit reason.
 #[derive(Debug)]
 pub enum VmExit {
@@ -31,6 +34,7 @@ pub enum VmExit {
     InvalidRegister,
     InvalidMemorySegment,
     UnimplementedInstruction,
+    Timeout,
 
     IoError(io::Error),
     ElfError(elf::Error),
@@ -55,6 +59,7 @@ impl fmt::Display for VmExit {
             VmExit::UnimplementedInstruction => {
                 write!(f, "unimplemented instruction")
             }
+            VmExit::Timeout => write!(f, "timeout"),
             VmExit::IoError(err) => write!(f, "IO error: {}", err),
             VmExit::ElfError(err) => write!(f, "ELF error: {}", err),
             VmExit::MmuError(err) => write!(f, "MMU error: {}", err),
@@ -325,8 +330,7 @@ pub struct Trace {
     /// Number of executed instructions.
     pub inst_execed: u64,
 
-    /// Number of visited code units (instructions in the case of the emulator
-    /// and blocks in the case of the JIT).
+    /// Number of executed PCs.
     pub coverage: HashSet<VirtAddr>,
 }
 
@@ -516,6 +520,10 @@ impl Emulator {
                 VirtAddr(pc as usize),
                 Perm(PERM_EXEC),
             )?;
+
+            if trace.inst_execed > TIMEOUT {
+                return Err(VmExit::Timeout);
+            }
 
             self.emulate_instruction(pc, inst)?;
 
@@ -1056,6 +1064,7 @@ impl Emulator {
     ///   - `rax=3`: Read fault, `rcx`: Memory address, `rdx`: Size.
     ///   - `rax=4`: Write fault, `rcx`: Memory address, `rdx`: Size.
     ///   - `rax=5`: Uninit fault, `rcx`: Memory address, `rdx`: Size.
+    ///   - `rax=6`: Timeout.
     /// - `rbx`: Next PC. In the case of a exception (EBREAK, ECALL or
     ///   read/write fault), it's the address of the instruction causing the
     ///   exception.
@@ -1085,7 +1094,7 @@ impl Emulator {
             let block_ptr = if let Some(ptr) = block_lookup {
                 ptr
             } else {
-                let block = self.lift_block(pc, lookup_table_len)?;
+                let block = self.lift_block(pc, lookup_table_len, trace)?;
 
                 let mut jit_cache =
                     self.jit_cache.as_ref().unwrap().lock().unwrap();
@@ -1099,7 +1108,7 @@ impl Emulator {
             let mut dirty_len = self.mmu.dirty_len();
             let perms_ptr = self.mmu.perms_ptr();
 
-            let mut inst_execed = 0u64;
+            let mut inst_execed = trace.inst_execed;
 
             let jit_exit: u64;
             let next_pc: u64;
@@ -1132,8 +1141,7 @@ impl Emulator {
             }
 
             // Update trace.
-            trace.inst_execed += inst_execed;
-            trace.coverage.insert(VirtAddr(pc as usize));
+            trace.inst_execed = inst_execed;
 
             // Update the length of the list of dirty blocks with the new
             // value.
@@ -1174,6 +1182,7 @@ impl Emulator {
                         size: rdx as usize,
                     }));
                 }
+                6 => return Err(VmExit::Timeout),
                 _ => unimplemented!("unknown jit_exit value"),
             }
         }
@@ -1184,6 +1193,7 @@ impl Emulator {
         &mut self,
         pc: u64,
         lookup_table_len: usize,
+        trace: &mut Trace,
     ) -> Result<Vec<u8>, VmExit> {
         let mut code = String::new();
         let mut cur_pc = pc;
@@ -1197,6 +1207,9 @@ impl Emulator {
                 VirtAddr(cur_pc as usize),
                 Perm(PERM_EXEC),
             )?;
+
+            // Update trace.
+            trace.coverage.insert(VirtAddr(cur_pc as usize));
 
             match self.lift_instruction(cur_pc, inst, lookup_table_len) {
                 Ok((inst_code, end)) => {
@@ -1225,9 +1238,20 @@ impl Emulator {
             "
                 BITS 64
 
+                ; Exit with timeout if the number of executed instructions is
+                ; too high.
+                cmp r8, {timeout}
+                jb .notimeout
+                mov rax, 6
+                mov rbx, {pc}
+                ret
+
+                .notimeout:
                 {code}
             ",
-            code = code
+            pc = pc,
+            code = code,
+            timeout = TIMEOUT
         );
 
         let block = match nasm::assemble(&code) {
@@ -1556,12 +1580,14 @@ impl Emulator {
 
                         .next_block:
 
-                        ; Mark following block as dirty.
-                        add rcx, 1
-                        bts qword [r13], rcx
-                        jc .out
-                        mov qword [r12+8*r14], rcx
-                        add r14, 1
+                        ; FIXME: Off-by-one. We have to check that this is not
+                        ; the last block.
+                        ;; Mark following block as dirty.
+                        ;add rcx, 1
+                        ;bts qword [r13], rcx
+                        ;jc .out
+                        ;mov qword [r12+8*r14], rcx
+                        ;add r14, 1
                         jmp .out
 
                         .fault:

@@ -3,6 +3,10 @@
 use std::cmp;
 use std::collections::HashSet;
 use std::fmt;
+use std::fs;
+use std::io;
+use std::io::Write;
+use std::path::Path;
 use std::process;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -27,7 +31,7 @@ const DEBUG_OUTPUT: bool = false;
 const NUM_THREADS: usize = 8;
 
 /// Memory size of the VM.
-const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
+const VM_MEM_SIZE: usize = 128 * 1024 * 1024;
 
 /// Memory size of the JIT cache.
 const JIT_CACHE_SIZE: usize = 32 * 1024 * 1024;
@@ -45,13 +49,19 @@ const CHECK_RAW: bool = false;
 /// If `true`, execute the target program using JIT compilation.
 const USE_JIT: bool = true;
 
+/// Inputs directory.
+const INPUTS_PATH: &str = "test-targets/inputs";
+
+/// Crashes directory.
+const CRASHES_PATH: &str = "test-targets/crashes";
+
+/// Log filename.
+const LOG_FILENAME: &str = "test-targets/fuzzer-objdump.log";
+
 /// Fuzzer's exit reason.
 #[derive(Debug)]
 enum FuzzExit {
     ProgramExit(u64),
-    SyscallError,
-
-    MmuError(mmu::Error),
     VmExit(VmExit),
 }
 
@@ -59,8 +69,6 @@ impl fmt::Display for FuzzExit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             FuzzExit::ProgramExit(code) => write!(f, "program exit: {}", code),
-            FuzzExit::SyscallError => write!(f, "syscall error"),
-            FuzzExit::MmuError(err) => write!(f, "MMU error: {}", err),
             FuzzExit::VmExit(vmexit) => write!(f, "VM exit: {}", vmexit),
         }
     }
@@ -68,7 +76,7 @@ impl fmt::Display for FuzzExit {
 
 impl From<mmu::Error> for FuzzExit {
     fn from(error: mmu::Error) -> FuzzExit {
-        FuzzExit::MmuError(error)
+        FuzzExit::VmExit(VmExit::MmuError(error))
     }
 }
 
@@ -78,14 +86,143 @@ impl From<VmExit> for FuzzExit {
     }
 }
 
+/// A unique crash is defined by the following characteristics:
+/// - PC when the crash occurred.
+/// - Fault type.
+/// - Memory address type.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+struct UniqueCrash(VirtAddr, FaultType, AddressType);
+
+impl fmt::Display for UniqueCrash {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "pc={} fault={} address={}", self.0, self.1, self.2)
+    }
+}
+
+/// Fault classification.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum FaultType {
+    /// Execution fault, due to non-executable memory, misaligned address or
+    /// invalid instruction.
+    Exec,
+
+    /// Memory read fault.
+    Read,
+
+    /// Memory write fault.
+    Write,
+
+    /// Uninitialized memory fault.
+    Uninit,
+
+    /// Memory address out of the program memory.
+    Bounds,
+}
+
+impl fmt::Display for FaultType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            FaultType::Exec => write!(f, "exec"),
+            FaultType::Read => write!(f, "read"),
+            FaultType::Write => write!(f, "write"),
+            FaultType::Uninit => write!(f, "uninit"),
+            FaultType::Bounds => write!(f, "bounds"),
+        }
+    }
+}
+
+/// Address range classification.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum AddressType {
+    /// Address within the range [0, 32KiB).
+    Null,
+
+    /// Address within the range [-32KiB, 0).
+    Negative,
+
+    /// Other addresses.
+    Normal,
+}
+
+impl fmt::Display for AddressType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            AddressType::Null => write!(f, "null"),
+            AddressType::Negative => write!(f, "negative"),
+            AddressType::Normal => write!(f, "normal"),
+        }
+    }
+}
+
+impl UniqueCrash {
+    fn new(vmexit: VmExit, pc: VirtAddr) -> Option<UniqueCrash> {
+        match vmexit {
+            VmExit::AddressMisaligned => {
+                Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(pc)))
+            }
+            VmExit::InvalidInstruction => {
+                Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(pc)))
+            }
+            VmExit::MmuError(mmu::Error::ExecFault { addr, .. }) => {
+                Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(addr)))
+            }
+            VmExit::MmuError(mmu::Error::ReadFault { addr, .. }) => {
+                Some(UniqueCrash(pc, FaultType::Read, AddressType::from(addr)))
+            }
+            VmExit::MmuError(mmu::Error::WriteFault { addr, .. }) => Some(
+                UniqueCrash(pc, FaultType::Write, AddressType::from(addr)),
+            ),
+            VmExit::MmuError(mmu::Error::UninitFault { addr, .. }) => Some(
+                UniqueCrash(pc, FaultType::Uninit, AddressType::from(addr)),
+            ),
+            VmExit::MmuError(mmu::Error::InvalidAddress { addr, .. }) => Some(
+                UniqueCrash(pc, FaultType::Bounds, AddressType::from(addr)),
+            ),
+            _ => None,
+        }
+    }
+
+    fn filename(&self) -> String {
+        format!("{}_{}_{}", self.0, self.1, self.2)
+    }
+}
+
+impl From<VirtAddr> for AddressType {
+    fn from(addr: VirtAddr) -> AddressType {
+        match *addr as isize {
+            0..=32767 => AddressType::Null,
+            -32768..=-1 => AddressType::Negative,
+            _ => AddressType::Normal,
+        }
+    }
+}
+
+/// Xorshift pseudorandom number generator.
+struct Rng(u64);
+
+impl Rng {
+    /// Returns a new Xorshift PRNG.
+    fn new() -> Rng {
+        Rng(0x5273e95b7c721b5a ^ rdtsc())
+    }
+
+    /// Returns the next random number.
+    fn rand(&mut self) -> usize {
+        let val = self.0;
+
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+
+        val as usize
+    }
+}
+
 /// Statistics recorded during the fuzzing session.
 #[derive(Default)]
 struct Stats {
     /// Total number of fuzz cases.
     fuzz_cases: u64,
-
-    /// Total number of crashes.
-    crashes: u64,
 
     /// Total of executed instructions.
     total_inst: u64,
@@ -101,6 +238,12 @@ struct Stats {
 
     /// Total number of CPU cycles spent in handling syscalls.
     syscall_cycles: u64,
+
+    /// Total number of CPU cycles spent mutating the input.
+    mutation_cycles: u64,
+
+    /// Total number of crashes.
+    crashes: u64,
 }
 
 /// Returns the current value of the Timestamp Counter.
@@ -111,7 +254,7 @@ fn rdtsc() -> u64 {
 /// InputFile represents the file opened by objdump.
 struct InputFile {
     /// Contents of the file.
-    contents: &'static [u8],
+    contents: Vec<u8>,
 
     /// Current read/write position in the file.
     cursor: usize,
@@ -132,17 +275,23 @@ struct Profile {
 /// A Fuzzer represents a instance of our fuzzer. It links everything together,
 /// for instance, memory allocation, file handling, statistics, etc.
 struct Fuzzer {
-    /// Initial state of the emulator. Shared among all fuzzer instances.
+    /// Initial state of the emulator.
     emu_init: Arc<Emulator>,
 
     /// Current state of the emulator.
     emu: Emulator,
 
-    /// Global statistics. Shared among all fuzzer instances.
+    /// Global statistics.
     stats: Arc<Mutex<Stats>>,
 
-    /// Global coverage. Shared among all fuzzer instances.
+    /// Global coverage.
     coverage: Arc<Mutex<HashSet<VirtAddr>>>,
+
+    /// Global corpus.
+    corpus: Arc<Mutex<HashSet<Vec<u8>>>>,
+
+    /// Global set of unique crashes.
+    unique_crashes: Arc<Mutex<HashSet<UniqueCrash>>>,
 
     /// The initial program break.
     brk_addr_init: VirtAddr,
@@ -150,9 +299,15 @@ struct Fuzzer {
     /// The current program break.
     brk_addr: VirtAddr,
 
+    /// If `true`, the input file is open.
+    input_file_is_open: bool,
+
     /// Input file. The fuzzer only supports one open file, which is enough for
     /// our use case.
-    input_file: Option<InputFile>,
+    input_file: InputFile,
+
+    /// Random number generator.
+    rng: Rng,
 }
 
 impl Fuzzer {
@@ -161,6 +316,8 @@ impl Fuzzer {
         emu_init: Arc<Emulator>,
         brk_addr_init: VirtAddr,
         coverage: Arc<Mutex<HashSet<VirtAddr>>>,
+        corpus: Arc<Mutex<HashSet<Vec<u8>>>>,
+        unique_crashes: Arc<Mutex<HashSet<UniqueCrash>>>,
         stats: Arc<Mutex<Stats>>,
     ) -> Fuzzer {
         let emu = emu_init.fork();
@@ -169,10 +326,17 @@ impl Fuzzer {
             emu_init,
             emu,
             coverage,
+            corpus,
+            unique_crashes,
             stats,
             brk_addr_init,
             brk_addr: brk_addr_init,
-            input_file: None,
+            input_file_is_open: false,
+            input_file: InputFile {
+                contents: Vec::new(),
+                cursor: 0,
+            },
+            rng: Rng::new(),
         }
     }
 
@@ -190,6 +354,10 @@ impl Fuzzer {
                 self.reset();
                 local_stats.reset_cycles += rdtsc() - reset_start;
 
+                let mutation_start = rdtsc();
+                self.mutate_input();
+                let mutation_cycles = rdtsc() - mutation_start;
+
                 // Run the target and handle the result.
                 let mut profile = Profile {
                     emu_trace: Trace {
@@ -200,7 +368,8 @@ impl Fuzzer {
                     syscall_cycles: 0,
                 };
                 let fcexit = self.run_fc(&mut profile);
-                self.handle_fcexit(fcexit);
+
+                self.handle_fcexit(fcexit, &mut local_stats);
 
                 if DEBUG_ONE {
                     panic!("DEBUG_ONE is enabled");
@@ -211,23 +380,57 @@ impl Fuzzer {
                 local_stats.total_inst += profile.emu_trace.inst_execed;
                 local_stats.vm_cycles += profile.vm_cycles;
                 local_stats.syscall_cycles += profile.syscall_cycles;
+                local_stats.mutation_cycles += mutation_cycles;
 
+                // Update coverage.
                 let mut coverage = self.coverage.lock().unwrap();
-                coverage.extend(profile.emu_trace.coverage);
+                let new_coverage = profile
+                    .emu_trace
+                    .coverage
+                    .iter()
+                    .fold(false, |acc, addr| acc | coverage.insert(*addr));
+
+                // If the coverage is bigger, add the fuzz case to the corpus.
+                if new_coverage {
+                    let mut corpus = self.corpus.lock().unwrap();
+                    corpus.insert(self.input_file.contents.clone());
+                }
             }
 
             // Update global stats.
             let mut stats = self.stats.lock().unwrap();
 
             stats.fuzz_cases += local_stats.fuzz_cases;
-            stats.crashes += local_stats.crashes;
             stats.total_inst += local_stats.total_inst;
             stats.reset_cycles += local_stats.reset_cycles;
             stats.vm_cycles += local_stats.vm_cycles;
             stats.syscall_cycles += local_stats.syscall_cycles;
+            stats.mutation_cycles += local_stats.mutation_cycles;
+            stats.crashes += local_stats.crashes;
 
             stats.total_cycles += rdtsc() - batch_start;
         }
+    }
+
+    /// Pick an input from the corpus and mutate it.
+    fn mutate_input(&mut self) {
+        // Get input from corpus.
+        let mut contents = {
+            let corpus = self.corpus.lock().unwrap();
+            let idx = self.rng.rand() % corpus.len();
+            corpus.iter().nth(idx).unwrap().clone()
+        };
+
+        // Mutate input.
+        if contents.len() > 0 {
+            for _ in 0..self.rng.rand() % 1024 {
+                let sel = self.rng.rand() % contents.len();
+                contents[sel] = self.rng.rand() as u8;
+            }
+        }
+
+        // Set input file contents.
+        self.input_file.contents = contents;
     }
 
     /// Runs a single fuzz_case.
@@ -256,8 +459,8 @@ impl Fuzzer {
     }
 
     /// Handle the results obtained by the fuzz case.
-    fn handle_fcexit(&mut self, fcexit: FuzzExit) {
-        // TODO(rm): Handle crashes as well as unexpected errors.
+    fn handle_fcexit(&mut self, fcexit: FuzzExit, stats: &mut Stats) {
+        let pc = self.emu.reg(RegAlias::Pc).unwrap();
 
         match fcexit {
             FuzzExit::ProgramExit(code) => {
@@ -266,12 +469,38 @@ impl Fuzzer {
                 }
             }
             FuzzExit::VmExit(vmexit) => {
-                if DEBUG {
-                    let pc = self.emu.reg(RegAlias::Pc).unwrap();
-                    eprintln!("[{:#010x}] {}\n{}", pc, vmexit, self.emu);
+                stats.crashes += 1;
+
+                let unique_crash =
+                    UniqueCrash::new(vmexit, VirtAddr(pc as usize));
+
+                if let Some(unique_crash) = unique_crash {
+                    let new_crash = {
+                        let mut unique_crashes =
+                            self.unique_crashes.lock().unwrap();
+                        unique_crashes.insert(unique_crash)
+                    };
+
+                    if new_crash {
+                        if DEBUG {
+                            eprintln!("unique_crash={}", unique_crash);
+                        }
+                        let crash_path = Path::new(CRASHES_PATH)
+                            .join(unique_crash.filename());
+                        fs::write(crash_path, &self.input_file.contents)
+                            .unwrap_or_else(|err| {
+                                eprintln!(
+                                    "error: could not write crash file: {}",
+                                    err
+                                );
+                                process::exit(1);
+                            });
+
+                        let mut corpus = self.corpus.lock().unwrap();
+                        corpus.insert(self.input_file.contents.clone());
+                    }
                 }
             }
-            err => todo!("unhandled error: {}", err),
         }
     }
 
@@ -279,7 +508,9 @@ impl Fuzzer {
     fn reset(&mut self) {
         self.emu.reset(&self.emu_init);
         self.brk_addr = self.brk_addr_init;
-        self.input_file = None;
+        self.input_file_is_open = false;
+        self.input_file.contents.clear();
+        self.input_file.cursor = 0;
     }
 
     /// Dispatches syscalls when the emulator exits with `VmExit::Ecall`,
@@ -319,7 +550,7 @@ impl Fuzzer {
         // After close, None is assigned. For any other file
         // descriptor, we just return 0 (success).
         if fd == 1337 {
-            self.input_file = None;
+            self.input_file_is_open = false;
         }
         self.emu.set_reg(RegAlias::A0, 0)?;
 
@@ -347,30 +578,36 @@ impl Fuzzer {
             return Ok(());
         }
 
-        // lseek also returns error if the input_file is not open (i.e.
-        // self.input_file == None).
-        if let Some(input_file) = &mut self.input_file {
-            let contents_len = input_file.contents.len();
+        // If the input_file is not open, return error.
+        if !self.input_file_is_open {
+            self.emu.set_reg(RegAlias::Pc, !0)?;
+            return Ok(());
+        }
 
-            let new_cursor = match whence {
-                SEEK_SET => offset as usize,
-                SEEK_CUR => input_file.cursor + offset as usize,
-                SEEK_END => (contents_len as i64 + offset as i64) as usize,
-                _ => return Err(FuzzExit::SyscallError),
-            };
+        // Emulate lseek.
+        let contents_len = self.input_file.contents.len();
 
-            // Although it should be possible, we do not support seeking beyond
-            // the end of the file, so we return with error in that case.
-            if new_cursor >= contents_len {
+        let new_cursor = match whence {
+            SEEK_SET => offset as usize,
+            SEEK_CUR => self.input_file.cursor + offset as usize,
+            SEEK_END => (contents_len as i64 + offset as i64) as usize,
+            _ => {
+                // Return error if the whence value is invalid.
                 self.emu.set_reg(RegAlias::A0, !0)?;
                 return Ok(());
             }
+        };
 
-            input_file.cursor = new_cursor;
-            self.emu.set_reg(RegAlias::A0, input_file.cursor as u64)?;
-        } else {
+        // Although it should be possible, we do not support seeking beyond
+        // the end of the file, so we return with error in that case.
+        if new_cursor >= contents_len {
             self.emu.set_reg(RegAlias::A0, !0)?;
+            return Ok(());
         }
+
+        self.input_file.cursor = new_cursor;
+        self.emu
+            .set_reg(RegAlias::A0, self.input_file.cursor as u64)?;
 
         Ok(())
     }
@@ -394,26 +631,27 @@ impl Fuzzer {
             return Ok(());
         }
 
-        // read also returns error if the input_file is not open (i.e.
-        // self.input_file == None).
-        if let Some(input_file) = &mut self.input_file {
-            let cursor = input_file.cursor;
-            let remaining = input_file.contents.len() - cursor;
-
-            // count cannot be bigger than the number of remaining bytes.
-            let count = cmp::min(count, remaining);
-
-            // checked_add is not needed here because the cursor is already
-            // sanitized by the lseek handler.
-            self.emu
-                .mmu_mut()
-                .write(buf, &input_file.contents[cursor..cursor + count])?;
-
-            input_file.cursor += count as usize;
-            self.emu.set_reg(RegAlias::A0, count as u64)?;
-        } else {
+        // If the input file is not open, return error.
+        if !self.input_file_is_open {
             self.emu.set_reg(RegAlias::A0, !0)?;
+            return Ok(());
         }
+
+        // Emulate read.
+        let cursor = self.input_file.cursor;
+        let remaining = self.input_file.contents.len() - cursor;
+
+        // count cannot be bigger than the number of remaining bytes.
+        let count = cmp::min(count, remaining);
+
+        // checked_add is not needed here because the cursor is already
+        // sanitized by the lseek handler.
+        self.emu
+            .mmu_mut()
+            .write(buf, &self.input_file.contents[cursor..cursor + count])?;
+
+        self.input_file.cursor += count as usize;
+        self.emu.set_reg(RegAlias::A0, count as u64)?;
 
         Ok(())
     }
@@ -528,17 +766,12 @@ impl Fuzzer {
         // We only allow to open the input file, which fd is always 1337. If
         // the path does not correspond to the expected input file, or the file
         // is already open, then return error.
-        if path_name != "input_file" || self.input_file.is_some() {
+        if path_name != "input_file" || self.input_file_is_open {
             self.emu.set_reg(RegAlias::A0, !0)?;
             return Ok(());
         }
 
-        let input_file = InputFile {
-            cursor: 0,
-            contents: include_bytes!("../../test-targets/xauth"),
-        };
-
-        self.input_file = Some(input_file);
+        self.input_file_is_open = true;
         self.emu.set_reg(RegAlias::A0, 1337)?;
 
         Ok(())
@@ -567,14 +800,22 @@ impl Fuzzer {
         //   https://github.com/riscv/riscv-newlib/blob/f289cef6be67da67b2d97a47d6576fa7e6b4c858/libgloss/riscv/kernel_stat.h
 
         // Set st_mode
-        let st_mode_addr =
-            statbuf.checked_add(16).ok_or(FuzzExit::SyscallError)?;
+        let st_mode_addr = statbuf.checked_add(16).ok_or(
+            mmu::Error::AddressIntegerOverflow {
+                addr: VirtAddr(statbuf as usize),
+                size: 16,
+            },
+        )?;
         let st_mode_addr = VirtAddr(st_mode_addr as usize);
         self.emu.mmu_mut().write_int::<u32>(st_mode_addr, 0x8000)?;
 
         // Set st_size
-        let st_size_addr =
-            statbuf.checked_add(48).ok_or(FuzzExit::SyscallError)?;
+        let st_size_addr = statbuf.checked_add(48).ok_or(
+            mmu::Error::AddressIntegerOverflow {
+                addr: VirtAddr(statbuf as usize),
+                size: 48,
+            },
+        )?;
         let st_size_addr = VirtAddr(st_size_addr as usize);
         self.emu.mmu_mut().write_int::<u64>(st_size_addr, 0x1337)?;
 
@@ -619,10 +860,12 @@ impl Fuzzer {
             return Ok(());
         }
 
-        let new_brk_addr = self
-            .brk_addr
-            .checked_sub(size)
-            .ok_or(FuzzExit::SyscallError)?;
+        let new_brk_addr = self.brk_addr.checked_sub(size).ok_or(
+            mmu::Error::AddressIntegerOverflow {
+                addr: self.brk_addr,
+                size,
+            },
+        )?;
         let new_brk_addr = VirtAddr(new_brk_addr);
 
         self.emu.mmu_mut().set_perms(new_brk_addr, size, Perm(0))?;
@@ -676,7 +919,7 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), FuzzExit> {
 
     // Store program args
     emu.mmu_mut().poke(VirtAddr(argv_base), b"objdump\x00")?;
-    emu.mmu_mut().poke(VirtAddr(argv_base + 32), b"-x\x00")?;
+    emu.mmu_mut().poke(VirtAddr(argv_base + 32), b"-g\x00")?;
     emu.mmu_mut()
         .poke(VirtAddr(argv_base + 64), b"input_file\x00")?;
 
@@ -695,6 +938,22 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), FuzzExit> {
     emu.set_reg(RegAlias::Sp, stack_init as u64)?;
 
     Ok(())
+}
+
+/// Read the contents of a directory and return a set with a deduplicated
+/// corpus.
+fn populate_corpus<P: AsRef<Path>>(
+    path: P,
+) -> Result<HashSet<Vec<u8>>, io::Error> {
+    let mut corpus = HashSet::new();
+
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_contents = fs::read(entry.path())?;
+        corpus.insert(file_contents);
+    }
+
+    Ok(corpus)
 }
 
 fn main() {
@@ -721,11 +980,19 @@ fn main() {
         emu_init = emu_init.with_jit(jit_cache);
     }
 
+    // Populate the initial corpus
+    let corpus = populate_corpus(INPUTS_PATH).unwrap_or_else(|err| {
+        eprintln!("error: could not generate intial corpus: {}", err);
+        process::exit(1);
+    });
+
     // The following elements are shared among all the spawned threads, so they
     // are wrapped within an `Arc`. The ones that are mutable are also
     // protected with a `Mutex`.
     let emu_init = Arc::new(emu_init);
     let coverage = Arc::new(Mutex::new(HashSet::new()));
+    let corpus = Arc::new(Mutex::new(corpus));
+    let unique_crashes = Arc::new(Mutex::new(HashSet::new()));
     let stats = Arc::new(Mutex::new(Stats::default()));
 
     // Get the current time to calculate statistics.
@@ -737,9 +1004,18 @@ fn main() {
     for _ in 0..num_threads {
         let emu_init = Arc::clone(&emu_init);
         let coverage = Arc::clone(&coverage);
+        let corpus = Arc::clone(&corpus);
+        let unique_crashes = Arc::clone(&unique_crashes);
         let stats = Arc::clone(&stats);
 
-        let fuzzer = Fuzzer::new(emu_init, brk_addr, coverage, stats);
+        let fuzzer = Fuzzer::new(
+            emu_init,
+            brk_addr,
+            coverage,
+            corpus,
+            unique_crashes,
+            stats,
+        );
 
         thread::spawn(move || fuzzer.go());
     }
@@ -747,13 +1023,41 @@ fn main() {
     // Show statistics in the main thread.
     let mut last_fuzz_cases = 0;
     let mut last_total_inst = 0;
-    loop {
-        thread::sleep(Duration::from_millis(1000));
+    let mut last_stats_time = Instant::now();
 
-        let stats = stats.lock().unwrap();
-        let coverage = coverage.lock().unwrap();
+    let mut logfile = fs::File::create(LOG_FILENAME).unwrap_or_else(|err| {
+        eprintln!("error: could not create log file: {}", err);
+        process::exit(1);
+    });
+
+    loop {
+        thread::sleep(Duration::from_millis(10));
 
         let elapsed = start.elapsed().as_secs_f64();
+        let stats = stats.lock().unwrap();
+        let unique_crashes = unique_crashes.lock().unwrap();
+        let coverage = coverage.lock().unwrap();
+
+        write!(
+            logfile,
+            "{:.4} {} {} {}\n",
+            elapsed,
+            stats.fuzz_cases,
+            unique_crashes.len(),
+            coverage.len()
+        )
+        .unwrap_or_else(|err| {
+            eprintln!("error: could not write to log file: {}", err);
+            process::exit(1);
+        });
+
+        let now = Instant::now();
+        if now.duration_since(last_stats_time) < Duration::from_millis(1000) {
+            continue;
+        }
+
+        let corpus = corpus.lock().unwrap();
+
         let last_fcps = stats.fuzz_cases - last_fuzz_cases;
         let fcps = stats.fuzz_cases as f64 / elapsed;
         let last_instps = stats.total_inst - last_total_inst;
@@ -762,27 +1066,35 @@ fn main() {
         let reset_time = stats.reset_cycles as f64 / stats.total_cycles as f64;
         let syscall_time =
             stats.syscall_cycles as f64 / stats.total_cycles as f64;
+        let mutation_time =
+            stats.mutation_cycles as f64 / stats.total_cycles as f64;
 
         println!(
             "[{elapsed:10.4}] cases {fuzz_cases:10} | \
+            unique crashes {unique_crashes:5} | crashes {crashes:5} | \
             fcps (last) {last_fcps:10.0} | fcps {fcps:10.1} | \
             Minst/s (last) {last_instps:10.0}| Minst/s {instps:10.1} | \
-            crashes {crashes:5} | coverage {coverage:10} | vm {vm_time:6.4} | \
-            reset {reset_time:6.4} | syscall {syscall_time:6.4}",
+            coverage {coverage:10} | corpus {corpus:10} | \
+            vm {vm_time:6.4} | reset {reset_time:6.4} | \
+            syscall {syscall_time:6.4} | mutation {mutation_time:6.4}",
             elapsed = elapsed,
             fuzz_cases = stats.fuzz_cases,
+            unique_crashes = unique_crashes.len(),
+            crashes = stats.crashes,
             last_fcps = last_fcps,
             fcps = fcps,
             last_instps = last_instps as f64 / 1e6,
             instps = instps / 1e6,
-            crashes = stats.crashes,
             coverage = coverage.len(),
+            corpus = corpus.len(),
             vm_time = vm_time,
             reset_time = reset_time,
-            syscall_time = syscall_time
+            syscall_time = syscall_time,
+            mutation_time = mutation_time
         );
 
         last_fuzz_cases = stats.fuzz_cases;
         last_total_inst = stats.total_inst;
+        last_stats_time = now;
     }
 }
