@@ -23,7 +23,7 @@ const DEBUG_ONE: bool = false;
 const DEBUG_OUTPUT: bool = false;
 
 /// Number of threads to spawn.
-const NUM_THREADS: usize = 1;
+const NUM_THREADS: usize = 8;
 
 /// Memory size of the VM.
 const VM_MEM_SIZE: usize = 32 * 1024 * 1024;
