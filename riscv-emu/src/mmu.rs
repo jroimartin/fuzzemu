@@ -135,7 +135,7 @@ impl Deref for Perm {
 }
 
 /// Virtual address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VirtAddr(pub usize);
 
 impl fmt::Display for VirtAddr {

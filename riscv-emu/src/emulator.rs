@@ -2,6 +2,7 @@
 //! Instruction Set and assumes little-endian.
 
 use std::cmp;
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -319,6 +320,16 @@ impl From<u32> for Jtype {
     }
 }
 
+/// An execution trace.
+pub struct Trace {
+    /// Number of executed instructions.
+    pub inst_execed: u64,
+
+    /// Number of visited code units (instructions in the case of the emulator
+    /// and blocks in the case of the JIT).
+    pub coverage: HashSet<VirtAddr>,
+}
+
 /// RISC-V emulator.
 pub struct Emulator {
     /// State of the registers.
@@ -483,18 +494,17 @@ impl Emulator {
         }
     }
 
-    /// Run until vm exit or error. In returns the number of executed
-    /// instructions in `inst_execed`.
-    pub fn run(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
+    /// Run until vm exit or error. It returns the execution trace in `trace`.
+    pub fn run(&mut self, trace: &mut Trace) -> Result<(), VmExit> {
         if self.jit_cache.is_some() {
-            self.run_jit(inst_execed)
+            self.run_jit(trace)
         } else {
-            self.run_emu(inst_execed)
+            self.run_emu(trace)
         }
     }
 
     /// Run code using pure emulation.
-    pub fn run_emu(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
+    pub fn run_emu(&mut self, trace: &mut Trace) -> Result<(), VmExit> {
         loop {
             let pc = self.reg(RegAlias::Pc)?;
 
@@ -508,7 +518,10 @@ impl Emulator {
             )?;
 
             self.emulate_instruction(pc, inst)?;
-            *inst_execed += 1;
+
+            // Update trace.
+            trace.inst_execed += 1;
+            trace.coverage.insert(VirtAddr(pc as usize));
         }
     }
 
@@ -1050,7 +1063,7 @@ impl Emulator {
     /// - `rdx`: Extra information.
     /// - `r8`: Updated number of executed instructions.
     /// - `r14`: Updated Mmu dirty len.
-    pub fn run_jit(&mut self, inst_execed: &mut u64) -> Result<(), VmExit> {
+    pub fn run_jit(&mut self, trace: &mut Trace) -> Result<(), VmExit> {
         let mut pc = self.reg(RegAlias::Pc)?;
 
         loop {
@@ -1086,6 +1099,8 @@ impl Emulator {
             let mut dirty_len = self.mmu.dirty_len();
             let perms_ptr = self.mmu.perms_ptr();
 
+            let mut inst_execed = 0u64;
+
             let jit_exit: u64;
             let next_pc: u64;
             let rcx: u64;
@@ -1094,7 +1109,7 @@ impl Emulator {
             unsafe {
                 asm!("call {block_ptr}",
                      block_ptr = in(reg) block_ptr,
-                     inout("r8") *inst_execed,
+                     inout("r8") inst_execed,
                      in("r9") lookup_table_ptr,
                      in("r10") regs_ptr,
                      in("r11") memory_ptr,
@@ -1115,6 +1130,10 @@ impl Emulator {
                     jit_exit, next_pc, inst_execed, dirty_len
                 );
             }
+
+            // Update trace.
+            trace.inst_execed += inst_execed;
+            trace.coverage.insert(VirtAddr(pc as usize));
 
             // Update the length of the list of dirty blocks with the new
             // value.
@@ -1493,12 +1512,9 @@ impl Emulator {
                 let dirty_bs_shift = DIRTY_BLOCK_SIZE.trailing_zeros();
 
                 code.push_str(&read_reg!(dec.rs1, "rcx"));
-                code.push_str(&read_reg!(dec.rs2, "rax"));
+                code.push_str(&read_reg!(dec.rs2, "rbx"));
                 code.push_str(&format!(
                     "
-                        ; Save rax, we'll clobber it while checking perms.
-                        mov rbx, rax
-
                         add rcx, {offset}
 
                         ; Check memory boundaries.
@@ -1521,7 +1537,7 @@ impl Emulator {
                         or rax, rdx
                         mov {size_mod} [r15+rcx], {rax}
 
-                        ; Restore rax and write.
+                        ; Write.
                         mov rax, rbx
                         mov {size_mod} [r11+rcx], {rax}
 

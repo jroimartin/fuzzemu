@@ -1,13 +1,14 @@
 //! Fuzzer based on a RISC-V emulator.
 
 use std::cmp;
+use std::collections::HashSet;
 use std::fmt;
 use std::process;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use riscv_emu::emulator::{Emulator, RegAlias, VmExit};
+use riscv_emu::emulator::{Emulator, RegAlias, Trace, VmExit};
 use riscv_emu::jit::JitCache;
 use riscv_emu::mmu::{
     self, Mmu, Perm, VirtAddr, PERM_RAW, PERM_READ, PERM_WRITE,
@@ -116,6 +117,18 @@ struct InputFile {
     cursor: usize,
 }
 
+/// Profiling information for one fuzz case.
+struct Profile {
+    /// Emulator trace.
+    emu_trace: Trace,
+
+    /// Number of cycles expent in the VM.
+    vm_cycles: u64,
+
+    /// Number of cycles expent in syscall handling.
+    syscall_cycles: u64,
+}
+
 /// A Fuzzer represents a instance of our fuzzer. It links everything together,
 /// for instance, memory allocation, file handling, statistics, etc.
 struct Fuzzer {
@@ -127,6 +140,9 @@ struct Fuzzer {
 
     /// Global statistics. Shared among all fuzzer instances.
     stats: Arc<Mutex<Stats>>,
+
+    /// Global coverage. Shared among all fuzzer instances.
+    coverage: Arc<Mutex<HashSet<VirtAddr>>>,
 
     /// The initial program break.
     brk_addr_init: VirtAddr,
@@ -144,6 +160,7 @@ impl Fuzzer {
     fn new(
         emu_init: Arc<Emulator>,
         brk_addr_init: VirtAddr,
+        coverage: Arc<Mutex<HashSet<VirtAddr>>>,
         stats: Arc<Mutex<Stats>>,
     ) -> Fuzzer {
         let emu = emu_init.fork();
@@ -151,6 +168,7 @@ impl Fuzzer {
         Fuzzer {
             emu_init,
             emu,
+            coverage,
             stats,
             brk_addr_init,
             brk_addr: brk_addr_init,
@@ -173,8 +191,16 @@ impl Fuzzer {
                 local_stats.reset_cycles += rdtsc() - reset_start;
 
                 // Run the target and handle the result.
-                let fcexit = self.run_fc(&mut local_stats);
-                self.handle_fcexit(fcexit, &mut local_stats);
+                let mut profile = Profile {
+                    emu_trace: Trace {
+                        inst_execed: 0,
+                        coverage: HashSet::new(),
+                    },
+                    vm_cycles: 0,
+                    syscall_cycles: 0,
+                };
+                let fcexit = self.run_fc(&mut profile);
+                self.handle_fcexit(fcexit);
 
                 if DEBUG_ONE {
                     panic!("DEBUG_ONE is enabled");
@@ -182,6 +208,12 @@ impl Fuzzer {
 
                 // Update local stats.
                 local_stats.fuzz_cases += 1;
+                local_stats.total_inst += profile.emu_trace.inst_execed;
+                local_stats.vm_cycles += profile.vm_cycles;
+                local_stats.syscall_cycles += profile.syscall_cycles;
+
+                let mut coverage = self.coverage.lock().unwrap();
+                coverage.extend(profile.emu_trace.coverage);
             }
 
             // Update global stats.
@@ -199,21 +231,17 @@ impl Fuzzer {
     }
 
     /// Runs a single fuzz_case.
-    fn run_fc(&mut self, stats: &mut Stats) -> FuzzExit {
+    fn run_fc(&mut self, profile: &mut Profile) -> FuzzExit {
         loop {
-            let mut total_inst = 0;
-
             let vm_start = rdtsc();
-            let run_result = self.emu.run(&mut total_inst);
-            stats.vm_cycles += rdtsc() - vm_start;
-
-            stats.total_inst += total_inst;
+            let run_result = self.emu.run(&mut profile.emu_trace);
+            profile.vm_cycles += rdtsc() - vm_start;
 
             match run_result {
                 Err(VmExit::Ecall) => {
                     let syscall_start = rdtsc();
                     let syscall_result = self.syscall_dispatcher();
-                    stats.syscall_cycles += rdtsc() - syscall_start;
+                    profile.syscall_cycles += rdtsc() - syscall_start;
 
                     if let Err(err) = syscall_result {
                         break err;
@@ -228,7 +256,7 @@ impl Fuzzer {
     }
 
     /// Handle the results obtained by the fuzz case.
-    fn handle_fcexit(&mut self, fcexit: FuzzExit, stats: &mut Stats) {
+    fn handle_fcexit(&mut self, fcexit: FuzzExit) {
         // TODO(rm): Handle crashes as well as unexpected errors.
 
         match fcexit {
@@ -241,10 +269,6 @@ impl Fuzzer {
                 if DEBUG {
                     let pc = self.emu.reg(RegAlias::Pc).unwrap();
                     eprintln!("[{:#010x}] {}\n{}", pc, vmexit, self.emu);
-                }
-
-                if vmexit_is_crash(&vmexit) {
-                    stats.crashes += 1;
                 }
             }
             err => todo!("unhandled error: {}", err),
@@ -628,11 +652,6 @@ impl Fuzzer {
     }
 }
 
-/// Returns true if the VmExit variant corresponds to a crash.
-pub fn vmexit_is_crash(vmexit: &VmExit) -> bool {
-    false
-}
-
 /// Set up a stack with a size of `STACK_SIZE` bytes. It also configures
 /// the command line argumets passed to the program.
 ///
@@ -702,10 +721,11 @@ fn main() {
         emu_init = emu_init.with_jit(jit_cache);
     }
 
-    // `emu_init` and `stats` will be shared among threads. So, they must be
-    // wrapped inside `Arc`. In the case of `stats`, it will be modified by the
-    // threads, so it also need a `Mutex`.
+    // The following elements are shared among all the spawned threads, so they
+    // are wrapped within an `Arc`. The ones that are mutable are also
+    // protected with a `Mutex`.
     let emu_init = Arc::new(emu_init);
+    let coverage = Arc::new(Mutex::new(HashSet::new()));
     let stats = Arc::new(Mutex::new(Stats::default()));
 
     // Get the current time to calculate statistics.
@@ -716,9 +736,10 @@ fn main() {
 
     for _ in 0..num_threads {
         let emu_init = Arc::clone(&emu_init);
+        let coverage = Arc::clone(&coverage);
         let stats = Arc::clone(&stats);
 
-        let fuzzer = Fuzzer::new(emu_init, brk_addr, stats);
+        let fuzzer = Fuzzer::new(emu_init, brk_addr, coverage, stats);
 
         thread::spawn(move || fuzzer.go());
     }
@@ -730,6 +751,7 @@ fn main() {
         thread::sleep(Duration::from_millis(1000));
 
         let stats = stats.lock().unwrap();
+        let coverage = coverage.lock().unwrap();
 
         let elapsed = start.elapsed().as_secs_f64();
         let last_fcps = stats.fuzz_cases - last_fuzz_cases;
@@ -742,19 +764,22 @@ fn main() {
             stats.syscall_cycles as f64 / stats.total_cycles as f64;
 
         println!(
-            "[{:10.4}] cases {:10} | fcps (last) {:10.0} | fcps {:10.1} | \
-            Minst/s (last) {:10.0}| Minst/s {:10.1} | crashes {:5} | \
-            vm {:6.4} | reset {:6.4} | syscall {:6.4}",
-            elapsed,
-            stats.fuzz_cases,
-            last_fcps,
-            fcps,
-            last_instps as f64 / 1e6,
-            instps / 1e6,
-            stats.crashes,
-            vm_time,
-            reset_time,
-            syscall_time,
+            "[{elapsed:10.4}] cases {fuzz_cases:10} | \
+            fcps (last) {last_fcps:10.0} | fcps {fcps:10.1} | \
+            Minst/s (last) {last_instps:10.0}| Minst/s {instps:10.1} | \
+            crashes {crashes:5} | coverage {coverage:10} | vm {vm_time:6.4} | \
+            reset {reset_time:6.4} | syscall {syscall_time:6.4}",
+            elapsed = elapsed,
+            fuzz_cases = stats.fuzz_cases,
+            last_fcps = last_fcps,
+            fcps = fcps,
+            last_instps = last_instps as f64 / 1e6,
+            instps = instps / 1e6,
+            crashes = stats.crashes,
+            coverage = coverage.len(),
+            vm_time = vm_time,
+            reset_time = reset_time,
+            syscall_time = syscall_time
         );
 
         last_fuzz_cases = stats.fuzz_cases;
