@@ -422,8 +422,8 @@ impl Fuzzer {
         };
 
         // Mutate input.
-        if contents.len() > 0 {
-            for _ in 0..self.rng.rand() % 1024 {
+        if !contents.is_empty() {
+            for _ in 0..self.rng.rand() % 512 {
                 let sel = self.rng.rand() % contents.len();
                 contents[sel] = self.rng.rand() as u8;
             }
@@ -460,46 +460,47 @@ impl Fuzzer {
 
     /// Handle the results obtained by the fuzz case.
     fn handle_fcexit(&mut self, fcexit: FuzzExit, stats: &mut Stats) {
+        // Calling unwrap here is safe , we now that `.reg()` cannot fail
+        // because `RegAlias::Pc` is a valid register.
         let pc = self.emu.reg(RegAlias::Pc).unwrap();
 
-        match fcexit {
+        let unique_crash = match fcexit {
             FuzzExit::ProgramExit(code) => {
                 if DEBUG {
                     eprintln!("program exited with {}", code);
                 }
+                None
             }
             FuzzExit::VmExit(vmexit) => {
-                stats.crashes += 1;
+                UniqueCrash::new(vmexit, VirtAddr(pc as usize))
+            }
+        };
 
-                let unique_crash =
-                    UniqueCrash::new(vmexit, VirtAddr(pc as usize));
+        if let Some(unique_crash) = unique_crash {
+            stats.crashes += 1;
 
-                if let Some(unique_crash) = unique_crash {
-                    let new_crash = {
-                        let mut unique_crashes =
-                            self.unique_crashes.lock().unwrap();
-                        unique_crashes.insert(unique_crash)
-                    };
+            let new_crash = {
+                let mut unique_crashes = self.unique_crashes.lock().unwrap();
+                unique_crashes.insert(unique_crash)
+            };
 
-                    if new_crash {
-                        if DEBUG {
-                            eprintln!("unique_crash={}", unique_crash);
-                        }
-                        let crash_path = Path::new(CRASHES_PATH)
-                            .join(unique_crash.filename());
-                        fs::write(crash_path, &self.input_file.contents)
-                            .unwrap_or_else(|err| {
-                                eprintln!(
-                                    "error: could not write crash file: {}",
-                                    err
-                                );
-                                process::exit(1);
-                            });
-
-                        let mut corpus = self.corpus.lock().unwrap();
-                        corpus.insert(self.input_file.contents.clone());
-                    }
+            if new_crash {
+                if DEBUG {
+                    eprintln!("unique_crash={}", unique_crash);
                 }
+                let crash_path =
+                    Path::new(CRASHES_PATH).join(unique_crash.filename());
+                fs::write(crash_path, &self.input_file.contents)
+                    .unwrap_or_else(|err| {
+                        eprintln!(
+                            "error: could not create crash file: {}",
+                            err
+                        );
+                        process::exit(1);
+                    });
+
+                let mut corpus = self.corpus.lock().unwrap();
+                corpus.insert(self.input_file.contents.clone());
             }
         }
     }
@@ -1038,9 +1039,9 @@ fn main() {
         let unique_crashes = unique_crashes.lock().unwrap();
         let coverage = coverage.lock().unwrap();
 
-        write!(
+        writeln!(
             logfile,
-            "{:.4} {} {} {}\n",
+            "{:.4} {} {} {}",
             elapsed,
             stats.fuzz_cases,
             unique_crashes.len(),
