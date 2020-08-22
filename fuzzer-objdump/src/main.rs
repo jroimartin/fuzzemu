@@ -156,32 +156,28 @@ impl fmt::Display for AddressType {
 
 impl UniqueCrash {
     fn new(vmexit: &VmExit, pc: VirtAddr) -> Option<UniqueCrash> {
-        match vmexit {
-            &VmExit::AddressMisaligned => {
+        match *vmexit {
+            VmExit::AddressMisaligned => {
                 Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(pc)))
             }
-            &VmExit::InvalidInstruction => {
+            VmExit::InvalidInstruction => {
                 Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(pc)))
             }
-            &VmExit::MmuError(mmu::Error::ExecFault { addr, .. }) => {
+            VmExit::MmuError(mmu::Error::ExecFault { addr, .. }) => {
                 Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(addr)))
             }
-            &VmExit::MmuError(mmu::Error::ReadFault { addr, .. }) => {
+            VmExit::MmuError(mmu::Error::ReadFault { addr, .. }) => {
                 Some(UniqueCrash(pc, FaultType::Read, AddressType::from(addr)))
             }
-            &VmExit::MmuError(mmu::Error::WriteFault { addr, .. }) => Some(
+            VmExit::MmuError(mmu::Error::WriteFault { addr, .. }) => Some(
                 UniqueCrash(pc, FaultType::Write, AddressType::from(addr)),
             ),
-            &VmExit::MmuError(mmu::Error::UninitFault { addr, .. }) => Some(
+            VmExit::MmuError(mmu::Error::UninitFault { addr, .. }) => Some(
                 UniqueCrash(pc, FaultType::Uninit, AddressType::from(addr)),
             ),
-            &VmExit::MmuError(mmu::Error::InvalidAddress { addr, .. }) => {
-                Some(UniqueCrash(
-                    pc,
-                    FaultType::Bounds,
-                    AddressType::from(addr),
-                ))
-            }
+            VmExit::MmuError(mmu::Error::InvalidAddress { addr, .. }) => Some(
+                UniqueCrash(pc, FaultType::Bounds, AddressType::from(addr)),
+            ),
             _ => None,
         }
     }
@@ -431,7 +427,7 @@ impl Fuzzer {
 
         // Mutate input.
         if !contents.is_empty() {
-            for _ in 0..self.rng.rand() % 512 {
+            for _ in 0..self.rng.rand() % 1024 % (self.rng.rand() % 1024 + 1) {
                 let sel = self.rng.rand() % contents.len();
                 contents[sel] = self.rng.rand() as u8;
             }
@@ -477,11 +473,11 @@ impl Fuzzer {
                 if DEBUG {
                     eprintln!("program exited with {}", code);
                 }
-                return
+                return;
             }
             FuzzExit::VmExit(VmExit::Timeout) => {
                 stats.timeouts += 1;
-                return
+                return;
             }
             FuzzExit::VmExit(ref vmexit) => {
                 UniqueCrash::new(vmexit, VirtAddr(pc as usize))
@@ -832,7 +828,9 @@ impl Fuzzer {
             },
         )?;
         let st_size_addr = VirtAddr(st_size_addr as usize);
-        self.emu.mmu_mut().write_int::<u64>(st_size_addr, 0x1337)?;
+        self.emu
+            .mmu_mut()
+            .write_int::<u64>(st_size_addr, 0x133713371337)?;
 
         self.emu.set_reg(RegAlias::A0, 0)?;
 
@@ -955,20 +953,22 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), FuzzExit> {
     Ok(())
 }
 
-/// Read the contents of a directory and return a set with a deduplicated
-/// corpus.
+/// Reads the contents of a directory recursively and returns a set with a
+/// deduplicated corpus.
 fn populate_corpus<P: AsRef<Path>>(
     path: P,
-) -> Result<HashSet<Vec<u8>>, io::Error> {
-    let mut corpus = HashSet::new();
-
+    corpus: &mut HashSet<Vec<u8>>,
+) -> Result<(), io::Error> {
     for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let file_contents = fs::read(entry.path())?;
-        corpus.insert(file_contents);
+        let path = entry?.path();
+        if path.is_dir() {
+            populate_corpus(path, corpus)?;
+        } else {
+            let file_contents = fs::read(path)?;
+            corpus.insert(file_contents);
+        }
     }
-
-    Ok(corpus)
+    Ok(())
 }
 
 fn main() {
@@ -977,7 +977,7 @@ fn main() {
 
     // Load the program file.
     let brk_addr = emu_init
-        .load_program("test-targets/binutils/objdump-riscv")
+        .load_program("test-targets/binutils/objdump-2.35-riscv")
         .unwrap_or_else(|err| {
             eprintln!("error: could not create emulator: {}", err);
             process::exit(1);
@@ -996,7 +996,8 @@ fn main() {
     }
 
     // Populate the initial corpus
-    let corpus = populate_corpus(INPUTS_PATH).unwrap_or_else(|err| {
+    let mut corpus = HashSet::new();
+    populate_corpus(INPUTS_PATH, &mut corpus).unwrap_or_else(|err| {
         eprintln!("error: could not generate intial corpus: {}", err);
         process::exit(1);
     });

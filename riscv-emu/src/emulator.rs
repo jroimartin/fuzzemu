@@ -21,7 +21,7 @@ use crate::mmu::{
 const DEBUG: bool = false;
 
 /// Maximum number of instructions to execute before returning a timeout.
-const TIMEOUT: u64 = 10_000_000_000;
+const TIMEOUT: u64 = 100_000_000;
 
 /// Emulator's exit reason.
 #[derive(Debug)]
@@ -1449,8 +1449,8 @@ impl Emulator {
                 let mut read_mask = 0u64;
                 let mut raw_mask = 0u64;
                 for i in 0..size {
-                    read_mask |= (PERM_READ as u64) << i * 8;
-                    raw_mask |= (PERM_RAW as u64) << i * 8;
+                    read_mask |= (PERM_READ as u64) << (i * 8);
+                    raw_mask |= (PERM_RAW as u64) << (i * 8);
                 }
 
                 code.push_str(&read_reg!(dec.rs1, "rcx"));
@@ -1524,8 +1524,8 @@ impl Emulator {
                 let mut write_mask = 0u64;
                 let mut raw_mask = 0u64;
                 for i in 0..size {
-                    write_mask |= (PERM_WRITE as u64) << i * 8;
-                    raw_mask |= (PERM_RAW as u64) << i * 8;
+                    write_mask |= (PERM_WRITE as u64) << (i * 8);
+                    raw_mask |= (PERM_RAW as u64) << (i * 8);
                 }
 
                 // Check DIRTY_BLOCK_SIZE fits the requirements.
