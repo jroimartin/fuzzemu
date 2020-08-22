@@ -1333,12 +1333,12 @@ impl Emulator {
                         mov rax, rbx
                         shr rax, 2
                         cmp rax, {lookup_table_len}
-                        jae .lookup_error
+                        jae .lookup_error_{target}
                         mov rax, [r9+8*rax]
                         test rax, rax
-                        jz .lookup_error
+                        jz .lookup_error_{target}
                         jmp rax
-                        .lookup_error:
+                        .lookup_error_{target}:
                         xor rax, rax
                         ret
                     ",
@@ -1422,12 +1422,16 @@ impl Emulator {
                     "
                         cmp rcx, rdx
                         {cmp_inst} .out
-                        {cache_lookup}
+                        {cache_lookup_true}
                         .out:
+                        {cache_lookup_false}
                     ",
                     cmp_inst = cmp_inst,
-                    cache_lookup = cache_lookup!(pc.wrapping_add(offset))
+                    cache_lookup_true = cache_lookup!(pc.wrapping_add(offset)),
+                    cache_lookup_false = cache_lookup!(pc.wrapping_add(4))
                 ));
+
+                return Ok((code, true));
             }
             0b0000011 => {
                 let dec = Itype::from(inst);
@@ -1581,8 +1585,7 @@ impl Emulator {
 
                         .next_block:
 
-                        ; FIXME: Off-by-one. We have to check that this is not
-                        ; the last block.
+                        ; FIXME: Off-by-one.
                         ;; Mark following block as dirty.
                         ;add rcx, 1
                         ;bts qword [r13], rcx
