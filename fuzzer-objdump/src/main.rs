@@ -155,29 +155,33 @@ impl fmt::Display for AddressType {
 }
 
 impl UniqueCrash {
-    fn new(vmexit: VmExit, pc: VirtAddr) -> Option<UniqueCrash> {
+    fn new(vmexit: &VmExit, pc: VirtAddr) -> Option<UniqueCrash> {
         match vmexit {
-            VmExit::AddressMisaligned => {
+            &VmExit::AddressMisaligned => {
                 Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(pc)))
             }
-            VmExit::InvalidInstruction => {
+            &VmExit::InvalidInstruction => {
                 Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(pc)))
             }
-            VmExit::MmuError(mmu::Error::ExecFault { addr, .. }) => {
+            &VmExit::MmuError(mmu::Error::ExecFault { addr, .. }) => {
                 Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(addr)))
             }
-            VmExit::MmuError(mmu::Error::ReadFault { addr, .. }) => {
+            &VmExit::MmuError(mmu::Error::ReadFault { addr, .. }) => {
                 Some(UniqueCrash(pc, FaultType::Read, AddressType::from(addr)))
             }
-            VmExit::MmuError(mmu::Error::WriteFault { addr, .. }) => Some(
+            &VmExit::MmuError(mmu::Error::WriteFault { addr, .. }) => Some(
                 UniqueCrash(pc, FaultType::Write, AddressType::from(addr)),
             ),
-            VmExit::MmuError(mmu::Error::UninitFault { addr, .. }) => Some(
+            &VmExit::MmuError(mmu::Error::UninitFault { addr, .. }) => Some(
                 UniqueCrash(pc, FaultType::Uninit, AddressType::from(addr)),
             ),
-            VmExit::MmuError(mmu::Error::InvalidAddress { addr, .. }) => Some(
-                UniqueCrash(pc, FaultType::Bounds, AddressType::from(addr)),
-            ),
+            &VmExit::MmuError(mmu::Error::InvalidAddress { addr, .. }) => {
+                Some(UniqueCrash(
+                    pc,
+                    FaultType::Bounds,
+                    AddressType::from(addr),
+                ))
+            }
             _ => None,
         }
     }
@@ -244,6 +248,9 @@ struct Stats {
 
     /// Total number of crashes.
     crashes: u64,
+
+    /// Total number of timeouts.
+    timeouts: u64,
 }
 
 /// Returns the current value of the Timestamp Counter.
@@ -407,6 +414,7 @@ impl Fuzzer {
             stats.syscall_cycles += local_stats.syscall_cycles;
             stats.mutation_cycles += local_stats.mutation_cycles;
             stats.crashes += local_stats.crashes;
+            stats.timeouts += local_stats.timeouts;
 
             stats.total_cycles += rdtsc() - batch_start;
         }
@@ -469,9 +477,13 @@ impl Fuzzer {
                 if DEBUG {
                     eprintln!("program exited with {}", code);
                 }
-                None
+                return
             }
-            FuzzExit::VmExit(vmexit) => {
+            FuzzExit::VmExit(VmExit::Timeout) => {
+                stats.timeouts += 1;
+                return
+            }
+            FuzzExit::VmExit(ref vmexit) => {
                 UniqueCrash::new(vmexit, VirtAddr(pc as usize))
             }
         };
@@ -502,6 +514,8 @@ impl Fuzzer {
                 let mut corpus = self.corpus.lock().unwrap();
                 corpus.insert(self.input_file.contents.clone());
             }
+        } else {
+            eprintln!("WARNING: unknown crash: {}", fcexit);
         }
     }
 
@@ -1073,8 +1087,9 @@ fn main() {
         println!(
             "[{elapsed:10.4}] cases {fuzz_cases:10} | \
             unique crashes {unique_crashes:5} | crashes {crashes:5} | \
+            timeouts {timeouts:5} | \
             fcps (last) {last_fcps:10.0} | fcps {fcps:10.1} | \
-            Minst/s (last) {last_instps:10.0}| Minst/s {instps:10.1} | \
+            Minst/s (last) {last_instps:10.0} | Minst/s {instps:10.1} | \
             coverage {coverage:10} | corpus {corpus:10} | \
             vm {vm_time:6.4} | reset {reset_time:6.4} | \
             syscall {syscall_time:6.4} | mutation {mutation_time:6.4}",
@@ -1082,6 +1097,7 @@ fn main() {
             fuzz_cases = stats.fuzz_cases,
             unique_crashes = unique_crashes.len(),
             crashes = stats.crashes,
+            timeouts = stats.timeouts,
             last_fcps = last_fcps,
             fcps = fcps,
             last_instps = last_instps as f64 / 1e6,

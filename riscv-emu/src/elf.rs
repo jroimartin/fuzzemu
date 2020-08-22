@@ -42,7 +42,7 @@ impl From<io::Error> for Error {
 }
 
 /// ELF program header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Phdr {
     offset: usize,
     virt_addr: VirtAddr,
@@ -101,8 +101,8 @@ impl Elf {
     }
 
     /// Program headers table.
-    pub fn phdrs(&self) -> Vec<Phdr> {
-        self.phdrs.clone()
+    pub fn phdrs(&self) -> &[Phdr] {
+        &self.phdrs
     }
 
     /// Parses an ELF file and returns an `Elf` structure.

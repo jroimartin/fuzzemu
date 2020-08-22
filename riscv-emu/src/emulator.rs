@@ -21,7 +21,7 @@ use crate::mmu::{
 const DEBUG: bool = false;
 
 /// Maximum number of instructions to execute before returning a timeout.
-const TIMEOUT: u64 = 100_000_000;
+const TIMEOUT: u64 = 10_000_000_000;
 
 /// Emulator's exit reason.
 #[derive(Debug)]
@@ -1240,7 +1240,8 @@ impl Emulator {
 
                 ; Exit with timeout if the number of executed instructions is
                 ; too high.
-                cmp r8, {timeout}
+                mov rax, {timeout}
+                cmp r8, rax
                 jb .notimeout
                 mov rax, 6
                 mov rbx, {pc}
