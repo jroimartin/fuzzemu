@@ -21,7 +21,7 @@ use crate::mmu::{
 const DEBUG: bool = false;
 
 /// Maximum number of instructions to execute before returning a timeout.
-const TIMEOUT: u64 = 100_000_000;
+const TIMEOUT: u64 = 1_000_000_000;
 
 /// Emulator's exit reason.
 #[derive(Debug)]
@@ -1383,8 +1383,8 @@ impl Emulator {
                 match dec.funct3 {
                     0b000 => {
                         // JALR
-                        code.push_str(&write_reg!(dec.rd, pc.wrapping_add(4)));
                         code.push_str(&read_reg!(dec.rs1, "rax"));
+                        code.push_str(&write_reg!(dec.rd, pc.wrapping_add(4)));
                         code.push_str(&format!(
                             "
                                 add rax, {offset}
