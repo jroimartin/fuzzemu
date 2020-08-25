@@ -18,13 +18,13 @@ use riscv_emu::mmu::{
 };
 
 /// If `true`, print debug messages.
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
 /// If `true`, run one fuzz case using one thread and panic afterwards.
-const DEBUG_ONE: bool = false;
+const DEBUG_ONE: bool = true;
 
 /// If `true`, print stdout/stderr output.
-const DEBUG_OUTPUT: bool = false;
+const DEBUG_OUTPUT: bool = true;
 
 /// Number of threads to spawn.
 const NUM_THREADS: usize = 8;
@@ -933,7 +933,7 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), FuzzExit> {
 
     // Store program args
     emu.mmu_mut().poke(VirtAddr(argv_base), b"objdump\x00")?;
-    emu.mmu_mut().poke(VirtAddr(argv_base + 32), b"-g\x00")?;
+    emu.mmu_mut().poke(VirtAddr(argv_base + 32), b"-x\x00")?;
     emu.mmu_mut()
         .poke(VirtAddr(argv_base + 64), b"input_file\x00")?;
 
@@ -973,7 +973,10 @@ fn populate_corpus<P: AsRef<Path>>(
 }
 
 fn malloc_cb(emu: &mut Emulator) -> Result<(), VmExit> {
-    panic!("malloc hook!");
+    println!("malloc hook!");
+    //emu.set_reg(RegAlias::A0, 1337);     // exit code
+    //emu.set_reg(RegAlias::Pc, 0x12ad38); // exit()
+    Ok(())
 }
 
 fn main() {

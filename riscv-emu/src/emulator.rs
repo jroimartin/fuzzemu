@@ -528,7 +528,14 @@ impl Emulator {
             let pc = self.reg(RegAlias::Pc)?;
 
             if let Some(hook) = self.hooks.get(&VirtAddr(pc as usize)) {
-                return hook(self);
+                hook(self)?;
+
+                // If the hook has changed the PC, continue execution in that
+                // position. Otherwise, just continue executing the hooked
+                // instruction.
+                if self.reg(RegAlias::Pc)? != pc {
+                    continue
+                }
             }
 
             if pc & 3 != 0 {
