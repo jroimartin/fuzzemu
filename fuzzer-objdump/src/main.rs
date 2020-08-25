@@ -18,13 +18,13 @@ use riscv_emu::mmu::{
 };
 
 /// If `true`, print debug messages.
-const DEBUG: bool = true;
+const DEBUG: bool = false;
 
 /// If `true`, run one fuzz case using one thread and panic afterwards.
-const DEBUG_ONE: bool = true;
+const DEBUG_ONE: bool = false;
 
 /// If `true`, print stdout/stderr output.
-const DEBUG_OUTPUT: bool = true;
+const DEBUG_OUTPUT: bool = false;
 
 /// Number of threads to spawn.
 const NUM_THREADS: usize = 8;
@@ -49,7 +49,7 @@ const CHECK_RAW: bool = false;
 const MUTATE: bool = false;
 
 /// If `true`, execute the target program using JIT compilation.
-const USE_JIT: bool = false;
+const USE_JIT: bool = true;
 
 /// Inputs directory.
 const INPUTS_PATH: &str = "test-targets/inputs";
@@ -441,11 +441,12 @@ impl Fuzzer {
         let pc = self.emu.reg(RegAlias::Pc).unwrap();
         let pc = VirtAddr(pc as usize);
 
+        if DEBUG {
+            eprintln!("FuzzExit: {}", fcexit);
+        }
+
         let unique_crash = match fcexit {
-            FuzzExit::ProgramExit(code) => {
-                if DEBUG {
-                    eprintln!("program exited with {}", code);
-                }
+            FuzzExit::ProgramExit(_) => {
                 return;
             }
             FuzzExit::VmExit(vmexit) => match vmexit {
@@ -974,7 +975,7 @@ fn populate_corpus<P: AsRef<Path>>(
 
 fn malloc_cb(emu: &mut Emulator) -> Result<(), VmExit> {
     println!("malloc hook!");
-    //emu.set_reg(RegAlias::A0, 1337);     // exit code
+    //emu.set_reg(RegAlias::A0, 1337); // exit code
     //emu.set_reg(RegAlias::Pc, 0x12ad38); // exit()
     Ok(())
 }
@@ -997,7 +998,7 @@ fn main() {
         emu_init = emu_init.with_jit(jit_cache);
     }
 
-    emu_init.hook(VirtAddr(0x10e2d0), malloc_cb);
+    //emu_init.hook(VirtAddr(0x10e2d0), malloc_cb);
 
     // Populate the initial corpus
     let mut corpus = HashSet::new();

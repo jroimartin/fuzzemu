@@ -2,7 +2,7 @@
 //! Instruction Set and assumes little-endian.
 
 use std::cmp;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -527,14 +527,15 @@ impl Emulator {
         loop {
             let pc = self.reg(RegAlias::Pc)?;
 
-            if let Some(hook) = self.hooks.get(&VirtAddr(pc as usize)) {
-                hook(self)?;
+            if let Some(hook_callback) = self.hooks.get(&VirtAddr(pc as usize))
+            {
+                hook_callback(self)?;
 
                 // If the hook has changed the PC, continue execution in that
                 // position. Otherwise, just continue executing the hooked
                 // instruction.
                 if self.reg(RegAlias::Pc)? != pc {
-                    continue
+                    continue;
                 }
             }
 
@@ -1091,40 +1092,52 @@ impl Emulator {
     ///   - `rax=4`: Write fault, `rcx`: Memory address, `rdx`: Size.
     ///   - `rax=5`: Uninit fault, `rcx`: Memory address, `rdx`: Size.
     ///   - `rax=6`: Timeout.
-    /// - `rbx`: Next PC. In the case of a exception (EBREAK, ECALL or
-    ///   read/write fault), it's the address of the instruction causing the
-    ///   exception.
+    ///   - `rax=7`: Hook. `rcx`: reentry address.
+    /// - `rbx`: Next PC. In the case of an exception (EBREAK, ECALL or
+    ///   read/write fault) or a hook, it's the address of the instruction
+    ///   causing the exception.
     /// - `rcx`: Extra information.
     /// - `rdx`: Extra information.
     /// - `r8`: Updated number of executed instructions.
     /// - `r14`: Updated Mmu dirty len.
     pub fn run_jit(&mut self, trace: &mut Trace) -> Result<(), VmExit> {
         let mut pc = self.reg(RegAlias::Pc)?;
+        let mut hook_reentry = None;
 
         loop {
-            if pc & 3 != 0 {
-                return Err(VmExit::AddressMisaligned);
-            }
-
-            let (lookup_table_ptr, lookup_table_len, block_lookup) = {
-                let jit_cache =
-                    self.jit_cache.as_ref().unwrap().lock().unwrap();
-
-                (
-                    jit_cache.lookup_table_ptr(),
-                    jit_cache.lookup_table_len(),
-                    jit_cache.lookup(VirtAddr(pc as usize)),
-                )
-            };
-
-            let block_ptr = if let Some(ptr) = block_lookup {
+            let block_ptr = if let Some(ptr) = hook_reentry.take() {
                 ptr
             } else {
-                let block = self.lift_block(pc, lookup_table_len, trace)?;
+                if pc & 3 != 0 {
+                    return Err(VmExit::AddressMisaligned);
+                }
 
-                let mut jit_cache =
+                let (lookup_table_len, block_lookup) = {
+                    let jit_cache =
+                        self.jit_cache.as_ref().unwrap().lock().unwrap();
+
+                    (
+                        jit_cache.lookup_table_len(),
+                        jit_cache.lookup(VirtAddr(pc as usize)),
+                    )
+                };
+
+                if let Some(ptr) = block_lookup {
+                    ptr
+                } else {
+                    let block =
+                        self.lift_block(pc, lookup_table_len, trace)?;
+
+                    let mut jit_cache =
+                        self.jit_cache.as_ref().unwrap().lock().unwrap();
+                    jit_cache.insert(VirtAddr(pc as usize), block)?
+                }
+            };
+
+            let lookup_table_ptr = {
+                let jit_cache =
                     self.jit_cache.as_ref().unwrap().lock().unwrap();
-                jit_cache.insert(VirtAddr(pc as usize), block)?
+                jit_cache.lookup_table_ptr()
             };
 
             let regs_ptr = self.regs.as_ptr();
@@ -1209,6 +1222,29 @@ impl Emulator {
                     }));
                 }
                 6 => return Err(VmExit::Timeout),
+                7 => {
+                    if let Some(hook_callback) =
+                        self.hooks.get(&VirtAddr(next_pc as usize))
+                    {
+                        hook_callback(self)?;
+
+                        // If the hook has changed the PC, continue execution
+                        // in that position. Otherwise, just continue executing
+                        // the hooked instruction.
+                        let hook_pc = self.reg(RegAlias::Pc)?;
+                        if hook_pc != next_pc {
+                            pc = hook_pc;
+                        } else {
+                            hook_reentry = Some(rcx as *const u8);
+                        }
+                        continue;
+                    } else {
+                        panic!(
+                            "could not find hook's callback: {:#x}",
+                            next_pc
+                        );
+                    }
+                }
                 _ => unimplemented!("unknown jit_exit value"),
             }
         }
@@ -1221,7 +1257,7 @@ impl Emulator {
         lookup_table_len: usize,
         trace: &mut Trace,
     ) -> Result<Vec<u8>, VmExit> {
-        let mut code = String::new();
+        let mut block_code = String::new();
         let mut cur_pc = pc;
 
         if DEBUG {
@@ -1239,14 +1275,33 @@ impl Emulator {
 
             match self.lift_instruction(cur_pc, inst, lookup_table_len) {
                 Ok((inst_code, end)) => {
-                    code.push_str(&format!(
+                    block_code.push_str(&format!(
                         "
                             inst_{cur_pc:x}:
+                        ",
+                        cur_pc = cur_pc,
+                    ));
+
+                    if self.hooks.contains_key(&VirtAddr(cur_pc as usize)) {
+                        block_code.push_str(&format!(
+                            "
+                                mov rax, 7
+                                mov rbx, {cur_pc}
+                                lea rcx, [rel .hook_reentry]
+                                ret
+
+                                .hook_reentry:
+                            ",
+                            cur_pc = cur_pc,
+                        ));
+                    }
+
+                    block_code.push_str(&format!(
+                        "
                             add r8, 1
 
                             {inst_code}
                         ",
-                        cur_pc = cur_pc,
                         inst_code = inst_code
                     ));
 
@@ -1274,10 +1329,10 @@ impl Emulator {
                 ret
 
                 .notimeout:
-                {code}
+                {block_code}
             ",
             pc = pc,
-            code = code,
+            block_code = block_code,
             timeout = TIMEOUT
         );
 
