@@ -548,7 +548,7 @@ macro_rules! impl_le_bytes {
     };
 }
 
-// Implemente LeBytes for unsigned integers.
+// Implement LeBytes for unsigned integers.
 impl_le_bytes!(u8);
 impl_le_bytes!(u16);
 impl_le_bytes!(u32);

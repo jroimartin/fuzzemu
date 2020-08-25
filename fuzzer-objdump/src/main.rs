@@ -7,7 +7,6 @@ use std::fs;
 use std::io;
 use std::io::Write;
 use std::path::Path;
-use std::process;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -86,19 +85,6 @@ impl From<VmExit> for FuzzExit {
     }
 }
 
-/// A unique crash is defined by the following characteristics:
-/// - PC when the crash occurred.
-/// - Fault type.
-/// - Memory address type.
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-struct UniqueCrash(VirtAddr, FaultType, AddressType);
-
-impl fmt::Display for UniqueCrash {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "pc={} fault={} address={}", self.0, self.1, self.2)
-    }
-}
-
 /// Fault classification.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum FaultType {
@@ -154,39 +140,6 @@ impl fmt::Display for AddressType {
     }
 }
 
-impl UniqueCrash {
-    fn new(vmexit: &VmExit, pc: VirtAddr) -> Option<UniqueCrash> {
-        match *vmexit {
-            VmExit::AddressMisaligned => {
-                Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(pc)))
-            }
-            VmExit::InvalidInstruction => {
-                Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(pc)))
-            }
-            VmExit::MmuError(mmu::Error::ExecFault { addr, .. }) => {
-                Some(UniqueCrash(pc, FaultType::Exec, AddressType::from(addr)))
-            }
-            VmExit::MmuError(mmu::Error::ReadFault { addr, .. }) => {
-                Some(UniqueCrash(pc, FaultType::Read, AddressType::from(addr)))
-            }
-            VmExit::MmuError(mmu::Error::WriteFault { addr, .. }) => Some(
-                UniqueCrash(pc, FaultType::Write, AddressType::from(addr)),
-            ),
-            VmExit::MmuError(mmu::Error::UninitFault { addr, .. }) => Some(
-                UniqueCrash(pc, FaultType::Uninit, AddressType::from(addr)),
-            ),
-            VmExit::MmuError(mmu::Error::InvalidAddress { addr, .. }) => Some(
-                UniqueCrash(pc, FaultType::Bounds, AddressType::from(addr)),
-            ),
-            _ => None,
-        }
-    }
-
-    fn filename(&self) -> String {
-        format!("{}_{}_{}", self.0, self.1, self.2)
-    }
-}
-
 impl From<VirtAddr> for AddressType {
     fn from(addr: VirtAddr) -> AddressType {
         match *addr as isize {
@@ -194,6 +147,25 @@ impl From<VirtAddr> for AddressType {
             -32768..=-1 => AddressType::Negative,
             _ => AddressType::Normal,
         }
+    }
+}
+
+/// A unique crash is defined by the following characteristics:
+/// - PC when the crash occurred.
+/// - Fault type.
+/// - Memory address type.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+struct UniqueCrash(VirtAddr, FaultType, AddressType);
+
+impl fmt::Display for UniqueCrash {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "pc={} fault={} address={}", self.0, self.1, self.2)
+    }
+}
+
+impl UniqueCrash {
+    fn filename(&self) -> String {
+        format!("{}_{}_{}", self.0, self.1, self.2)
     }
 }
 
@@ -427,7 +399,7 @@ impl Fuzzer {
 
         // Mutate input.
         if !contents.is_empty() {
-            for _ in 0..self.rng.rand() % 1024 % (self.rng.rand() % 1024 + 1) {
+            for _ in 0..self.rng.rand() % 32 {
                 let sel = self.rng.rand() % contents.len();
                 contents[sel] = self.rng.rand() as u8;
             }
@@ -461,12 +433,10 @@ impl Fuzzer {
             }
         }
     }
-
     /// Handle the results obtained by the fuzz case.
     fn handle_fcexit(&mut self, fcexit: FuzzExit, stats: &mut Stats) {
-        // Calling unwrap here is safe , we now that `.reg()` cannot fail
-        // because `RegAlias::Pc` is a valid register.
         let pc = self.emu.reg(RegAlias::Pc).unwrap();
+        let pc = VirtAddr(pc as usize);
 
         let unique_crash = match fcexit {
             FuzzExit::ProgramExit(code) => {
@@ -479,39 +449,54 @@ impl Fuzzer {
                 stats.timeouts += 1;
                 return;
             }
-            FuzzExit::VmExit(ref vmexit) => {
-                UniqueCrash::new(vmexit, VirtAddr(pc as usize))
+            FuzzExit::VmExit(VmExit::AddressMisaligned) => {
+                UniqueCrash(pc, FaultType::Exec, AddressType::from(pc))
+            }
+            FuzzExit::VmExit(VmExit::InvalidInstruction) => {
+                UniqueCrash(pc, FaultType::Exec, AddressType::from(pc))
+            }
+            FuzzExit::VmExit(VmExit::MmuError(mmu::Error::ExecFault {
+                addr,
+                ..
+            })) => UniqueCrash(pc, FaultType::Exec, AddressType::from(addr)),
+            FuzzExit::VmExit(VmExit::MmuError(mmu::Error::ReadFault {
+                addr,
+                ..
+            })) => UniqueCrash(pc, FaultType::Read, AddressType::from(addr)),
+            FuzzExit::VmExit(VmExit::MmuError(mmu::Error::WriteFault {
+                addr,
+                ..
+            })) => UniqueCrash(pc, FaultType::Write, AddressType::from(addr)),
+            FuzzExit::VmExit(VmExit::MmuError(mmu::Error::UninitFault {
+                addr,
+                ..
+            })) => UniqueCrash(pc, FaultType::Uninit, AddressType::from(addr)),
+            FuzzExit::VmExit(VmExit::MmuError(
+                mmu::Error::InvalidAddress { addr, .. },
+            )) => UniqueCrash(pc, FaultType::Bounds, AddressType::from(addr)),
+            FuzzExit::VmExit(vmexit) => {
+                panic!("Unexpected VmExit error: {}", vmexit);
             }
         };
 
-        if let Some(unique_crash) = unique_crash {
-            stats.crashes += 1;
+        stats.crashes += 1;
 
-            let new_crash = {
-                let mut unique_crashes = self.unique_crashes.lock().unwrap();
-                unique_crashes.insert(unique_crash)
-            };
+        let new_crash = {
+            let mut unique_crashes = self.unique_crashes.lock().unwrap();
+            unique_crashes.insert(unique_crash)
+        };
 
-            if new_crash {
-                if DEBUG {
-                    eprintln!("unique_crash={}", unique_crash);
-                }
-                let crash_path =
-                    Path::new(CRASHES_PATH).join(unique_crash.filename());
-                fs::write(crash_path, &self.input_file.contents)
-                    .unwrap_or_else(|err| {
-                        eprintln!(
-                            "error: could not create crash file: {}",
-                            err
-                        );
-                        process::exit(1);
-                    });
-
-                let mut corpus = self.corpus.lock().unwrap();
-                corpus.insert(self.input_file.contents.clone());
+        if new_crash {
+            if DEBUG {
+                eprintln!("unique_crash={}", unique_crash);
             }
-        } else {
-            eprintln!("WARNING: unknown crash: {}", fcexit);
+            let crash_path =
+                Path::new(CRASHES_PATH).join(unique_crash.filename());
+            fs::write(crash_path, &self.input_file.contents)
+                .expect("could not create crash file");
+
+            let mut corpus = self.corpus.lock().unwrap();
+            corpus.insert(self.input_file.contents.clone());
         }
     }
 
@@ -700,14 +685,37 @@ impl Fuzzer {
     /// fstat syscall handle.
     fn syscall_fstat(&mut self) -> Result<(), FuzzExit> {
         // This is not a real implementation, but it's enough to bypass the
-        // objdump checks. We just return with error.
+        // objdump checks.
         let fd = self.emu.reg(RegAlias::A0)?;
+        let statbuf = self.emu.reg(RegAlias::A1)?;
 
         if DEBUG {
             eprintln!("fstat: fd={}", fd);
         }
 
-        self.emu.set_reg(RegAlias::A0, !0)?;
+        // Set st_mode
+        let st_mode_addr = statbuf.checked_add(16).ok_or(
+            mmu::Error::AddressIntegerOverflow {
+                addr: VirtAddr(statbuf as usize),
+                size: 16,
+            },
+        )?;
+        let st_mode_addr = VirtAddr(st_mode_addr as usize);
+        self.emu.mmu_mut().write_int::<u32>(st_mode_addr, 0x8000)?;
+
+        // Set st_size
+        let st_size_addr = statbuf.checked_add(48).ok_or(
+            mmu::Error::AddressIntegerOverflow {
+                addr: VirtAddr(statbuf as usize),
+                size: 48,
+            },
+        )?;
+        let st_size_addr = VirtAddr(st_size_addr as usize);
+        self.emu
+            .mmu_mut()
+            .write_int::<u64>(st_size_addr, 0x133713371337)?;
+
+        self.emu.set_reg(RegAlias::A0, 0)?;
 
         Ok(())
     }
@@ -801,14 +809,6 @@ impl Fuzzer {
         if DEBUG {
             eprintln!("stat: path_name={}", path_name);
         }
-
-        // bucom.c:621, objdump.c:572
-        // stat() >= 0
-        // statbuf.st_mode == _IFREG
-        // statbuf.st_size > 0
-        //
-        // Received struct:
-        //   https://github.com/riscv/riscv-newlib/blob/f289cef6be67da67b2d97a47d6576fa7e6b4c858/libgloss/riscv/kernel_stat.h
 
         // Set st_mode
         let st_mode_addr = statbuf.checked_add(16).ok_or(
@@ -978,16 +978,10 @@ fn main() {
     // Load the program file.
     let brk_addr = emu_init
         .load_program("test-targets/binutils/objdump-2.35-riscv")
-        .unwrap_or_else(|err| {
-            eprintln!("error: could not create emulator: {}", err);
-            process::exit(1);
-        });
+        .expect("could not create emulator");
 
     // Set up the stack.
-    setup_stack(&mut emu_init).unwrap_or_else(|err| {
-        eprintln!("error: could not set up the stack: {}", err);
-        process::exit(1);
-    });
+    setup_stack(&mut emu_init).expect("could not set up the stack");
 
     // In JIT mode, create a cache and pass it to the emulator.
     if USE_JIT {
@@ -997,10 +991,8 @@ fn main() {
 
     // Populate the initial corpus
     let mut corpus = HashSet::new();
-    populate_corpus(INPUTS_PATH, &mut corpus).unwrap_or_else(|err| {
-        eprintln!("error: could not generate intial corpus: {}", err);
-        process::exit(1);
-    });
+    populate_corpus(INPUTS_PATH, &mut corpus)
+        .expect("could not generate intial corpus");
 
     // The following elements are shared among all the spawned threads, so they
     // are wrapped within an `Arc`. The ones that are mutable are also
@@ -1041,10 +1033,8 @@ fn main() {
     let mut last_total_inst = 0;
     let mut last_stats_time = Instant::now();
 
-    let mut logfile = fs::File::create(LOG_FILENAME).unwrap_or_else(|err| {
-        eprintln!("error: could not create log file: {}", err);
-        process::exit(1);
-    });
+    let mut logfile =
+        fs::File::create(LOG_FILENAME).expect("could not create log file");
 
     loop {
         thread::sleep(Duration::from_millis(10));
@@ -1062,10 +1052,7 @@ fn main() {
             unique_crashes.len(),
             coverage.len()
         )
-        .unwrap_or_else(|err| {
-            eprintln!("error: could not write to log file: {}", err);
-            process::exit(1);
-        });
+        .unwrap();
 
         let now = Instant::now();
         if now.duration_since(last_stats_time) < Duration::from_millis(1000) {
