@@ -2,7 +2,7 @@
 //! Instruction Set and assumes little-endian.
 
 use std::cmp;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -21,7 +21,7 @@ use crate::mmu::{
 const DEBUG: bool = false;
 
 /// Maximum number of instructions to execute before returning a timeout.
-const TIMEOUT: u64 = 1_000_000_000;
+const TIMEOUT: u64 = 100_000_000;
 
 /// Emulator's exit reason.
 #[derive(Debug)]
@@ -334,6 +334,9 @@ pub struct Trace {
     pub coverage: HashSet<VirtAddr>,
 }
 
+/// A callback called by a hook.
+type HookCallback = fn(&mut Emulator) -> Result<(), VmExit>;
+
 /// RISC-V emulator.
 pub struct Emulator {
     /// State of the registers.
@@ -348,6 +351,10 @@ pub struct Emulator {
     /// The cache is shared among all the emulator instances and must be
     /// thread-safe, that's why it's wrapped inside Arc<Mutex<>>.
     jit_cache: Option<Arc<Mutex<JitCache>>>,
+
+    /// User defined hooks. The callback will be called just before the
+    /// instruction at the specific virtual address is executed.
+    hooks: HashMap<VirtAddr, HookCallback>,
 }
 
 impl fmt::Display for Emulator {
@@ -379,6 +386,7 @@ impl Emulator {
             regs: [0; 33],
             mmu,
             jit_cache: None,
+            hooks: HashMap::new(),
         }
     }
 
@@ -399,6 +407,7 @@ impl Emulator {
             regs: self.regs,
             mmu: self.mmu.fork(),
             jit_cache,
+            hooks: self.hooks.clone(),
         }
     }
 
@@ -498,6 +507,12 @@ impl Emulator {
         }
     }
 
+    /// Hooks the virtual address `addr`. `cb` is the callback called just
+    /// before the instruction at `addr` is executed.
+    pub fn hook(&mut self, addr: VirtAddr, cb: HookCallback) {
+        self.hooks.insert(addr, cb);
+    }
+
     /// Run until vm exit or error. It returns the execution trace in `trace`.
     pub fn run(&mut self, trace: &mut Trace) -> Result<(), VmExit> {
         if self.jit_cache.is_some() {
@@ -511,6 +526,10 @@ impl Emulator {
     pub fn run_emu(&mut self, trace: &mut Trace) -> Result<(), VmExit> {
         loop {
             let pc = self.reg(RegAlias::Pc)?;
+
+            if let Some(hook) = self.hooks.get(&VirtAddr(pc as usize)) {
+                return hook(self);
+            }
 
             if pc & 3 != 0 {
                 return Err(VmExit::AddressMisaligned);

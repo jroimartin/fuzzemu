@@ -45,8 +45,11 @@ const STACK_SIZE: usize = 1024 * 1024;
 /// permissions.
 const CHECK_RAW: bool = false;
 
+/// If `true`, mutate inputs.
+const MUTATE: bool = false;
+
 /// If `true`, execute the target program using JIT compilation.
-const USE_JIT: bool = true;
+const USE_JIT: bool = false;
 
 /// Inputs directory.
 const INPUTS_PATH: &str = "test-targets/inputs";
@@ -330,7 +333,7 @@ impl Fuzzer {
                 local_stats.reset_cycles += rdtsc() - reset_start;
 
                 let mutation_start = rdtsc();
-                self.mutate_input();
+                self.set_and_mutate_input();
                 let mutation_cycles = rdtsc() - mutation_start;
 
                 // Run the target and handle the result.
@@ -389,7 +392,7 @@ impl Fuzzer {
     }
 
     /// Pick an input from the corpus and mutate it.
-    fn mutate_input(&mut self) {
+    fn set_and_mutate_input(&mut self) {
         // Get input from corpus.
         let mut contents = {
             let corpus = self.corpus.lock().unwrap();
@@ -398,8 +401,8 @@ impl Fuzzer {
         };
 
         // Mutate input.
-        if !contents.is_empty() {
-            for _ in 0..self.rng.rand() % 32 {
+        if MUTATE && !contents.is_empty() {
+            for _ in 0..self.rng.rand() % 128 {
                 let sel = self.rng.rand() % contents.len();
                 contents[sel] = self.rng.rand() as u8;
             }
@@ -445,38 +448,36 @@ impl Fuzzer {
                 }
                 return;
             }
-            FuzzExit::VmExit(VmExit::Timeout) => {
-                stats.timeouts += 1;
-                return;
-            }
-            FuzzExit::VmExit(VmExit::AddressMisaligned) => {
-                UniqueCrash(pc, FaultType::Exec, AddressType::from(pc))
-            }
-            FuzzExit::VmExit(VmExit::InvalidInstruction) => {
-                UniqueCrash(pc, FaultType::Exec, AddressType::from(pc))
-            }
-            FuzzExit::VmExit(VmExit::MmuError(mmu::Error::ExecFault {
-                addr,
-                ..
-            })) => UniqueCrash(pc, FaultType::Exec, AddressType::from(addr)),
-            FuzzExit::VmExit(VmExit::MmuError(mmu::Error::ReadFault {
-                addr,
-                ..
-            })) => UniqueCrash(pc, FaultType::Read, AddressType::from(addr)),
-            FuzzExit::VmExit(VmExit::MmuError(mmu::Error::WriteFault {
-                addr,
-                ..
-            })) => UniqueCrash(pc, FaultType::Write, AddressType::from(addr)),
-            FuzzExit::VmExit(VmExit::MmuError(mmu::Error::UninitFault {
-                addr,
-                ..
-            })) => UniqueCrash(pc, FaultType::Uninit, AddressType::from(addr)),
-            FuzzExit::VmExit(VmExit::MmuError(
-                mmu::Error::InvalidAddress { addr, .. },
-            )) => UniqueCrash(pc, FaultType::Bounds, AddressType::from(addr)),
-            FuzzExit::VmExit(vmexit) => {
-                panic!("Unexpected VmExit error: {}", vmexit);
-            }
+            FuzzExit::VmExit(vmexit) => match vmexit {
+                VmExit::Timeout => {
+                    stats.timeouts += 1;
+                    return;
+                }
+                VmExit::AddressMisaligned => {
+                    UniqueCrash(pc, FaultType::Exec, AddressType::from(pc))
+                }
+                VmExit::InvalidInstruction => {
+                    UniqueCrash(pc, FaultType::Exec, AddressType::from(pc))
+                }
+                VmExit::MmuError(mmu::Error::ExecFault { addr, .. }) => {
+                    UniqueCrash(pc, FaultType::Exec, AddressType::from(addr))
+                }
+                VmExit::MmuError(mmu::Error::ReadFault { addr, .. }) => {
+                    UniqueCrash(pc, FaultType::Read, AddressType::from(addr))
+                }
+                VmExit::MmuError(mmu::Error::WriteFault { addr, .. }) => {
+                    UniqueCrash(pc, FaultType::Write, AddressType::from(addr))
+                }
+                VmExit::MmuError(mmu::Error::UninitFault { addr, .. }) => {
+                    UniqueCrash(pc, FaultType::Uninit, AddressType::from(addr))
+                }
+                VmExit::MmuError(mmu::Error::InvalidAddress {
+                    addr, ..
+                }) => {
+                    UniqueCrash(pc, FaultType::Bounds, AddressType::from(addr))
+                }
+                _ => panic!("Unexpected VmExit error: {}", vmexit),
+            },
         };
 
         stats.crashes += 1;
@@ -971,6 +972,10 @@ fn populate_corpus<P: AsRef<Path>>(
     Ok(())
 }
 
+fn malloc_cb(emu: &mut Emulator) -> Result<(), VmExit> {
+    panic!("malloc hook!");
+}
+
 fn main() {
     let mmu = Mmu::new(VM_MEM_SIZE);
     let mut emu_init = Emulator::new(mmu);
@@ -988,6 +993,8 @@ fn main() {
         let jit_cache = JitCache::new(*brk_addr, JIT_CACHE_SIZE);
         emu_init = emu_init.with_jit(jit_cache);
     }
+
+    emu_init.hook(VirtAddr(0x10e2d0), malloc_cb);
 
     // Populate the initial corpus
     let mut corpus = HashSet::new();
