@@ -660,6 +660,8 @@ mod tests {
             perms: vec![Perm(0); DIRTY_BLOCK_SIZE],
             dirty: vec![],
             dirty_bitmap: vec![0; 1],
+            brk: VirtAddr(0),
+            active_allocs: HashMap::new(),
         };
 
         assert_eq!(mmu, want);
