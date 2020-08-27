@@ -13,9 +13,7 @@ use std::time::{Duration, Instant};
 
 use riscv_emu::emulator::{Emulator, RegAlias, Trace, VmExit};
 use riscv_emu::jit::JitCache;
-use riscv_emu::mmu::{
-    self, Mmu, Perm, VirtAddr, PERM_RAW, PERM_READ, PERM_WRITE,
-};
+use riscv_emu::mmu::{self, Mmu, Perm, VirtAddr, PERM_READ, PERM_WRITE};
 
 /// If `true`, print debug messages.
 const DEBUG: bool = false;
@@ -46,7 +44,7 @@ const STACK_SIZE: usize = 1024 * 1024;
 const CHECK_RAW: bool = false;
 
 /// If `true`, mutate inputs.
-const MUTATE: bool = false;
+const MUTATE: bool = true;
 
 /// If `true`, execute the target program using JIT compilation.
 const USE_JIT: bool = true;
@@ -106,6 +104,9 @@ enum FaultType {
 
     /// Memory address out of the program memory.
     Bounds,
+
+    /// Invalid free, due to double free or corrupted heap.
+    Free,
 }
 
 impl fmt::Display for FaultType {
@@ -116,6 +117,7 @@ impl fmt::Display for FaultType {
             FaultType::Write => write!(f, "write"),
             FaultType::Uninit => write!(f, "uninit"),
             FaultType::Bounds => write!(f, "bounds"),
+            FaultType::Free => write!(f, "free"),
         }
     }
 }
@@ -271,17 +273,11 @@ struct Fuzzer {
     /// Global set of unique crashes.
     unique_crashes: Arc<Mutex<HashSet<UniqueCrash>>>,
 
-    /// The initial program break.
-    brk_addr_init: VirtAddr,
-
-    /// The current program break.
-    brk_addr: VirtAddr,
-
     /// If `true`, the input file is open.
     input_file_is_open: bool,
 
-    /// Input file. The fuzzer only supports one open file, which is enough for
-    /// our use case.
+    /// Input file. The fuzzer only supports one input file, which is enough
+    /// for our use case.
     input_file: InputFile,
 
     /// Random number generator.
@@ -292,7 +288,6 @@ impl Fuzzer {
     /// Returns a new fuzzer instance.
     fn new(
         emu_init: Arc<Emulator>,
-        brk_addr_init: VirtAddr,
         coverage: Arc<Mutex<HashSet<VirtAddr>>>,
         corpus: Arc<Mutex<HashSet<Vec<u8>>>>,
         unique_crashes: Arc<Mutex<HashSet<UniqueCrash>>>,
@@ -307,8 +302,6 @@ impl Fuzzer {
             corpus,
             unique_crashes,
             stats,
-            brk_addr_init,
-            brk_addr: brk_addr_init,
             input_file_is_open: false,
             input_file: InputFile {
                 contents: Vec::new(),
@@ -316,6 +309,14 @@ impl Fuzzer {
             },
             rng: Rng::new(),
         }
+    }
+
+    /// Restore the fuzzer to its initial state.
+    fn reset(&mut self) {
+        self.emu.reset(&self.emu_init);
+        self.input_file_is_open = false;
+        self.input_file.contents.clear();
+        self.input_file.cursor = 0;
     }
 
     /// Start a fuzzer worker. Normally, one fuzzer per core is spawned.
@@ -442,7 +443,7 @@ impl Fuzzer {
         let pc = VirtAddr(pc as usize);
 
         if DEBUG {
-            eprintln!("FuzzExit: {}", fcexit);
+            eprintln!("Fuzz exit: {}", fcexit);
         }
 
         let unique_crash = match fcexit {
@@ -477,6 +478,9 @@ impl Fuzzer {
                 }) => {
                     UniqueCrash(pc, FaultType::Bounds, AddressType::from(addr))
                 }
+                VmExit::MmuError(mmu::Error::InvalidFree { addr }) => {
+                    UniqueCrash(pc, FaultType::Free, AddressType::from(addr))
+                }
                 _ => panic!("Unexpected VmExit error: {}", vmexit),
             },
         };
@@ -490,7 +494,7 @@ impl Fuzzer {
 
         if new_crash {
             if DEBUG {
-                eprintln!("unique_crash={}", unique_crash);
+                eprintln!("Unique crash: {}", unique_crash);
             }
             let crash_path =
                 Path::new(CRASHES_PATH).join(unique_crash.filename());
@@ -500,15 +504,6 @@ impl Fuzzer {
             let mut corpus = self.corpus.lock().unwrap();
             corpus.insert(self.input_file.contents.clone());
         }
-    }
-
-    /// Restore the fuzzer to its initial state.
-    fn reset(&mut self) {
-        self.emu.reset(&self.emu_init);
-        self.brk_addr = self.brk_addr_init;
-        self.input_file_is_open = false;
-        self.input_file.contents.clear();
-        self.input_file.cursor = 0;
     }
 
     /// Dispatches syscalls when the emulator exits with `VmExit::Ecall`,
@@ -713,9 +708,10 @@ impl Fuzzer {
             },
         )?;
         let st_size_addr = VirtAddr(st_size_addr as usize);
-        self.emu
-            .mmu_mut()
-            .write_int::<u64>(st_size_addr, 0x133713371337)?;
+        self.emu.mmu_mut().write_int::<u64>(
+            st_size_addr,
+            self.input_file.contents.len() as u64,
+        )?;
 
         self.emu.set_reg(RegAlias::A0, 0)?;
 
@@ -735,40 +731,14 @@ impl Fuzzer {
 
     /// brk syscall handle.
     fn syscall_brk(&mut self) -> Result<(), FuzzExit> {
-        let addr = self.emu.reg(RegAlias::A0)? as usize;
-
-        if DEBUG {
-            eprintln!(
-                "brk: addr={:#010x} (previous addr={})",
-                addr, self.brk_addr
-            );
-        }
-
-        // If address is zero, brk returns the current brk address.
+        // brk should not be called, the allocator funcions are hooked and
+        // replaced by our own implementations. The only special case is
+        // A0 == 0; in that case, 0 is returned.
+        let addr = self.emu.reg(RegAlias::A0)?;
         if addr == 0 {
-            self.emu.set_reg(RegAlias::A0, *self.brk_addr as u64)?;
             return Ok(());
         }
-
-        // We don't case about the returned values. On success, brk returns the
-        // requested address, which is already in A0.
-        if addr >= *self.brk_addr {
-            // Allocate
-            let size = addr - *self.brk_addr;
-            if DEBUG {
-                eprintln!("brk: allocate({:#x})", size);
-            }
-            self.allocate(size)?;
-        } else {
-            // Free
-            let size = *self.brk_addr - addr;
-            if DEBUG {
-                eprintln!("brk: free({:#x})", size);
-            }
-            self.free(size)?;
-        }
-
-        Ok(())
+        panic!("brk should not be called: addr={:#010x}", addr);
     }
 
     /// open syscall handle.
@@ -830,62 +800,12 @@ impl Fuzzer {
             },
         )?;
         let st_size_addr = VirtAddr(st_size_addr as usize);
-        self.emu
-            .mmu_mut()
-            .write_int::<u64>(st_size_addr, 0x133713371337)?;
+        self.emu.mmu_mut().write_int::<u64>(
+            st_size_addr,
+            self.input_file.contents.len() as u64,
+        )?;
 
         self.emu.set_reg(RegAlias::A0, 0)?;
-
-        Ok(())
-    }
-
-    /// Allocates new memory. Allocation is done by incrementing the program's
-    /// data space by `size` bytes. This function returns the previous brk
-    /// address.
-    ///
-    /// If CHECK_RAW is true, the new memory has RAW|WRITE permissions, so
-    /// unitialized memory accesses are detected. On the other hand, if
-    /// CHECK_RAW is false, the new memory has READ|WRITE permissions.
-    fn allocate(&mut self, size: usize) -> Result<VirtAddr, FuzzExit> {
-        if size == 0 {
-            return Ok(self.brk_addr);
-        }
-
-        let perms = if CHECK_RAW {
-            Perm(PERM_RAW | PERM_WRITE)
-        } else {
-            Perm(PERM_READ | PERM_WRITE)
-        };
-
-        self.emu.mmu_mut().set_perms(self.brk_addr, size, perms)?;
-
-        let prev_brk_addr = self.brk_addr;
-
-        // checked_add() is not needed here because this has been already
-        // checked in the previous call to set_perms().
-        self.brk_addr = VirtAddr(*prev_brk_addr + size);
-
-        Ok(prev_brk_addr)
-    }
-
-    /// Deallocate memory. This is done by decreasing the program's data space
-    /// by `size` bytes and removing all the perissions of the freed region.
-    fn free(&mut self, size: usize) -> Result<(), FuzzExit> {
-        if size == 0 {
-            return Ok(());
-        }
-
-        let new_brk_addr = self.brk_addr.checked_sub(size).ok_or(
-            mmu::Error::AddressIntegerOverflow {
-                addr: self.brk_addr,
-                size,
-            },
-        )?;
-        let new_brk_addr = VirtAddr(new_brk_addr);
-
-        self.emu.mmu_mut().set_perms(new_brk_addr, size, Perm(0))?;
-
-        self.brk_addr = new_brk_addr;
 
         Ok(())
     }
@@ -934,7 +854,7 @@ fn setup_stack(emu: &mut Emulator) -> Result<(), FuzzExit> {
 
     // Store program args
     emu.mmu_mut().poke(VirtAddr(argv_base), b"objdump\x00")?;
-    emu.mmu_mut().poke(VirtAddr(argv_base + 32), b"-x\x00")?;
+    emu.mmu_mut().poke(VirtAddr(argv_base + 32), b"-g\x00")?;
     emu.mmu_mut()
         .poke(VirtAddr(argv_base + 64), b"input_file\x00")?;
 
@@ -973,10 +893,126 @@ fn populate_corpus<P: AsRef<Path>>(
     Ok(())
 }
 
-fn malloc_cb(emu: &mut Emulator) -> Result<(), VmExit> {
-    println!("malloc hook!");
-    //emu.set_reg(RegAlias::A0, 1337); // exit code
-    //emu.set_reg(RegAlias::Pc, 0x12ad38); // exit()
+/// _malloc_r hook.
+fn malloc_r_cb(emu: &mut Emulator) -> Result<(), VmExit> {
+    let size = emu.reg(RegAlias::A1)? as usize;
+    if DEBUG {
+        println!("malloc: size={:#x}", size);
+    }
+
+    if size == 0 {
+        emu.set_reg(RegAlias::A0, 0)?;
+    } else {
+        let addr = emu.mmu_mut().malloc(size, CHECK_RAW)?;
+        if DEBUG {
+            println!("malloc: ret={}", addr);
+        }
+        emu.set_reg(RegAlias::A0, *addr as u64)?;
+    }
+
+    emu.set_reg(RegAlias::Pc, emu.reg(RegAlias::Ra)?)?;
+    Ok(())
+}
+
+/// _calloc_r hook.
+fn calloc_r_cb(emu: &mut Emulator) -> Result<(), VmExit> {
+    let nmemb = emu.reg(RegAlias::A1)? as usize;
+    let size = emu.reg(RegAlias::A2)? as usize;
+    if DEBUG {
+        println!("calloc: nmemb={:#x} size={:#x}", nmemb, size);
+    }
+
+    if nmemb == 0 || size == 0 {
+        emu.set_reg(RegAlias::A0, 0)?;
+    } else {
+        if let Some(total_size) = nmemb.checked_mul(size) {
+            let addr = emu.mmu_mut().malloc(total_size, CHECK_RAW)?;
+
+            // Set memory to zero.
+            let zeros = vec![0u8; total_size];
+            emu.mmu_mut().write(addr, &zeros)?;
+
+            if DEBUG {
+                println!("calloc: ret={}", addr);
+            }
+            emu.set_reg(RegAlias::A0, *addr as u64)?;
+        } else {
+            // If the multiplication of nmemb and size would result in integer
+            // overflow, then calloc() returns an error.
+            emu.set_reg(RegAlias::A0, 0)?;
+        }
+    }
+
+    emu.set_reg(RegAlias::Pc, emu.reg(RegAlias::Ra)?)?;
+    Ok(())
+}
+
+/// _realloc_r hook.
+fn realloc_r_cb(emu: &mut Emulator) -> Result<(), VmExit> {
+    let ptr = emu.reg(RegAlias::A1)?;
+    let ptr = VirtAddr(ptr as usize);
+    let size = emu.reg(RegAlias::A2)? as usize;
+
+    if DEBUG {
+        println!("realloc: ptr={} size={:#x}", ptr, size);
+    }
+
+    if *ptr == 0 {
+        // Equivalent to malloc.
+        if size == 0 {
+            emu.set_reg(RegAlias::A0, 0)?;
+        } else {
+            let addr = emu.mmu_mut().malloc(size as usize, CHECK_RAW)?;
+            if DEBUG {
+                println!("realloc: ret={}", addr);
+            }
+            emu.set_reg(RegAlias::A0, *addr as u64)?;
+        }
+    } else {
+        if size == 0 {
+            // Equivalent to free.
+            if *ptr != 0 {
+                emu.mmu_mut().free(ptr)?;
+            }
+        } else {
+            // Free old memory.
+            let old_size = emu.mmu_mut().free(ptr)?;
+
+            // Calculate the amount of data to copy.
+            let copy_size = cmp::min(old_size, size as usize);
+
+            // Copy old data.
+            let mut old_data = vec![0u8; copy_size];
+            emu.mmu().peek(ptr, &mut old_data)?;
+
+            // Allocate new memory and copy old data.
+            let addr = emu.mmu_mut().malloc(size as usize, CHECK_RAW)?;
+            emu.mmu_mut().write(addr, &old_data)?;
+
+            // Return new address.
+            if DEBUG {
+                println!("realloc: ret={}", addr);
+            }
+            emu.set_reg(RegAlias::A0, *addr as u64)?;
+        }
+    }
+
+    emu.set_reg(RegAlias::Pc, emu.reg(RegAlias::Ra)?)?;
+    Ok(())
+}
+
+/// _free_r hook.
+fn free_r_cb(emu: &mut Emulator) -> Result<(), VmExit> {
+    let addr = emu.reg(RegAlias::A1)?;
+    if DEBUG {
+        println!("free: addr={:#x}", addr);
+    }
+
+    if addr != 0 {
+        emu.mmu_mut().free(VirtAddr(addr as usize))?;
+    }
+
+    emu.set_reg(RegAlias::Pc, emu.reg(RegAlias::Ra)?)?;
     Ok(())
 }
 
@@ -985,7 +1021,7 @@ fn main() {
     let mut emu_init = Emulator::new(mmu);
 
     // Load the program file.
-    let brk_addr = emu_init
+    emu_init
         .load_program("test-targets/binutils/objdump-2.35-riscv")
         .expect("could not create emulator");
 
@@ -993,12 +1029,17 @@ fn main() {
     setup_stack(&mut emu_init).expect("could not set up the stack");
 
     // In JIT mode, create a cache and pass it to the emulator.
+    let emu_brk = emu_init.mmu().brk();
     if USE_JIT {
-        let jit_cache = JitCache::new(*brk_addr, JIT_CACHE_SIZE);
+        let jit_cache = JitCache::new(*emu_brk, JIT_CACHE_SIZE);
         emu_init = emu_init.with_jit(jit_cache);
     }
 
-    //emu_init.hook(VirtAddr(0x10e2d0), malloc_cb);
+    // Set hooks in memory allocation functions.
+    emu_init.hook(VirtAddr(0x10e2d0), malloc_r_cb);
+    emu_init.hook(VirtAddr(0x10b3e0), calloc_r_cb);
+    emu_init.hook(VirtAddr(0x110a30), realloc_r_cb);
+    emu_init.hook(VirtAddr(0x10c7a8), free_r_cb);
 
     // Populate the initial corpus
     let mut corpus = HashSet::new();
@@ -1027,14 +1068,8 @@ fn main() {
         let unique_crashes = Arc::clone(&unique_crashes);
         let stats = Arc::clone(&stats);
 
-        let fuzzer = Fuzzer::new(
-            emu_init,
-            brk_addr,
-            coverage,
-            corpus,
-            unique_crashes,
-            stats,
-        );
+        let fuzzer =
+            Fuzzer::new(emu_init, coverage, corpus, unique_crashes, stats);
 
         thread::spawn(move || fuzzer.go());
     }

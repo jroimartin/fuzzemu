@@ -395,6 +395,11 @@ impl Emulator {
         &self.mmu
     }
 
+    /// Returns a mutable reference to the internal MMU of the emulator.
+    pub fn mmu_mut(&mut self) -> &mut Mmu {
+        &mut self.mmu
+    }
+
     /// Returns a copy of the Emulator, including its internal state.
     pub fn fork(&self) -> Emulator {
         let jit_cache = if let Some(cache) = &self.jit_cache {
@@ -417,11 +422,6 @@ impl Emulator {
         self.mmu.reset(&other.mmu);
     }
 
-    /// Returns a mutable reference to the internal MMU of the emulator.
-    pub fn mmu_mut(&mut self) -> &mut Mmu {
-        &mut self.mmu
-    }
-
     /// Enable JIT compilation. `cache` is the JIT cache used to store the
     /// compiled instructions.
     pub fn with_jit(mut self, cache: JitCache) -> Emulator {
@@ -432,12 +432,11 @@ impl Emulator {
     }
 
     /// Loads an ELF program in the emulator. It also points the program
-    /// counter to the entrypoint of the program. The function returns the
-    /// address of the first byte after the end of the program memory.
+    /// counter to the entrypoint of the program and sets the program break.
     pub fn load_program<P: AsRef<Path>>(
         &mut self,
         program: P,
-    ) -> Result<VirtAddr, VmExit> {
+    ) -> Result<(), VmExit> {
         let contents = fs::read(program)?;
         let elf = Elf::parse(&contents)?;
 
@@ -469,7 +468,15 @@ impl Emulator {
         // Place the program counter in the entrypoint.
         self.set_reg(RegAlias::Pc, *elf.entry() as u64)?;
 
-        Ok(VirtAddr(max_addr))
+        // Set the program break to point just after the end of the process's
+        // memory. 16-byte aligned.
+        let max_addr_aligned = max_addr
+            .checked_add(0xf)
+            .ok_or(VmExit::InvalidMemorySegment)?
+            & !0xf;
+        self.mmu.set_brk(VirtAddr(max_addr_aligned));
+
+        Ok(())
     }
 
     /// Sets the value of the register `reg` to `val`.

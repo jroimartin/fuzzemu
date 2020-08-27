@@ -1,6 +1,7 @@
 //! Emulated MMU with byte-level memory permissions able to detect
 //! uninitialized memory accesses.
 
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt;
 use std::mem;
@@ -59,6 +60,9 @@ pub enum Error {
         exp: Perm,
         cur: Perm,
     },
+
+    /// Invalid free due to double free or heap corruption.
+    InvalidFree { addr: VirtAddr },
 }
 
 impl fmt::Display for Error {
@@ -92,6 +96,9 @@ impl fmt::Display for Error {
                 "unknown fault: addr={} size={} exp={} cur={}",
                 addr, size, exp, cur
             ),
+            Error::InvalidFree { addr } => {
+                write!(f, "invalid free: addr={}", addr)
+            }
         }
     }
 }
@@ -175,6 +182,12 @@ pub struct Mmu {
 
     /// Tracks which parts of memory have been dirtied.
     dirty_bitmap: Vec<u64>,
+
+    /// Program break. Memory is allocated starting at this address.
+    brk: VirtAddr,
+
+    /// List of active allocations.
+    active_allocs: HashMap<VirtAddr, usize>,
 }
 
 impl Mmu {
@@ -192,6 +205,8 @@ impl Mmu {
             perms: vec![Perm(0); size],
             dirty: Vec::with_capacity(size / DIRTY_BLOCK_SIZE + 1),
             dirty_bitmap: vec![0; size / DIRTY_BLOCK_SIZE / 64 + 1],
+            brk: VirtAddr(0),
+            active_allocs: HashMap::new(),
         }
     }
 
@@ -209,6 +224,8 @@ impl Mmu {
             perms: self.perms.clone(),
             dirty: Vec::with_capacity(self.size / DIRTY_BLOCK_SIZE + 1),
             dirty_bitmap: vec![0; self.size / DIRTY_BLOCK_SIZE / 64 + 1],
+            brk: self.brk,
+            active_allocs: self.active_allocs.clone(),
         }
     }
 
@@ -224,6 +241,11 @@ impl Mmu {
             self.perms[start..end].copy_from_slice(&other.perms[start..end]);
         }
         self.dirty.clear();
+
+        self.brk = other.brk;
+
+        self.active_allocs.clear();
+        self.active_allocs.extend(other.active_allocs.iter());
     }
 
     /// Returns the length of the internal list of dirty blocks.
@@ -263,6 +285,16 @@ impl Mmu {
     /// Returns a raw pointer to the internal bitmap of dirty blocks.
     pub fn dirty_bitmap_ptr(&self) -> *const u64 {
         self.dirty_bitmap.as_ptr()
+    }
+
+    /// Returns the current program break.
+    pub fn brk(&self) -> VirtAddr {
+        self.brk
+    }
+
+    /// Sets the program break.
+    pub fn set_brk(&mut self, addr: VirtAddr) {
+        self.brk = addr;
     }
 
     /// Set memory permissions in the given range.
@@ -509,6 +541,59 @@ impl Mmu {
         let dst = &mut bytes[..mem::size_of::<T::Target>()];
         self.peek(addr, dst)?;
         Ok(T::from_le_bytes(bytes))
+    }
+
+    /// Strict memory allocator. This function tries to allocate `size` bytes
+    /// and returns the address of the allocated memory. If `raw` is true, it
+    /// is also able to detect accesses to unitialized data.
+    pub fn malloc(
+        &mut self,
+        size: usize,
+        raw: bool,
+    ) -> Result<VirtAddr, Error> {
+        // 16-byte alignment. A guard region is kept between chunks. These
+        // region has 0 permissions, which allows to detect OOB.
+        let aligned_size =
+            size.checked_add(0xfff)
+                .ok_or(Error::AddressIntegerOverflow {
+                    addr: self.brk,
+                    size: size,
+                })?
+                & !0xf;
+
+        // Set permissions according to the `raw` value. Which enables the
+        // detection of uninit faults.
+        let perms = if raw {
+            Perm(PERM_WRITE | PERM_RAW)
+        } else {
+            Perm(PERM_WRITE | PERM_READ)
+        };
+        self.set_perms(self.brk, size, perms)?;
+
+        // Update the list of active allocations.
+        self.active_allocs.insert(self.brk, size);
+
+        // Update brk and save the previous value, where the allocated memory
+        // starts.
+        let prev_brk = self.brk;
+        *self.brk += aligned_size;
+
+        Ok(prev_brk)
+    }
+
+    /// Strict memory free.
+    pub fn free(&mut self, addr: VirtAddr) -> Result<usize, Error> {
+        if let Some(size) = self.active_allocs.remove(&addr) {
+            // The permissions of the freed memory are set to 0, which allows
+            // to detect UAF.
+            self.set_perms(addr, size, Perm(0))?;
+            Ok(size)
+        } else {
+            // If the address is not in the list of active allocations, this is
+            // an invalid free. This can happen due to a double free or a
+            // corrupted heap.
+            Err(Error::InvalidFree { addr })
+        }
     }
 }
 
