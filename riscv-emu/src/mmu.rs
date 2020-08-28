@@ -551,7 +551,7 @@ impl Mmu {
         size: usize,
         raw: bool,
     ) -> Result<VirtAddr, Error> {
-        // 16-byte alignment. A guard region is kept between chunks. These
+        // 16-byte alignment. A guard region is kept between chunks. This
         // region has 0 permissions, which allows to detect OOB.
         let aligned_size =
             size.checked_add(0xfff)
