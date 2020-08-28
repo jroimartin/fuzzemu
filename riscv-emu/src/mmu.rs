@@ -571,6 +571,10 @@ impl Mmu {
                 })?
                 & !0xf;
 
+        // Make sure the full memory region (allocated bytes + guard region) is
+        // valid and starts with 0 permissions.
+        self.set_perms(self.brk, aligned_size, Perm(0))?;
+
         // Set permissions according to the `raw` value. Which enables the
         // detection of uninit faults.
         let perms = if raw {
@@ -1098,5 +1102,119 @@ mod tests {
         mmu.poke_int::<u128>(VirtAddr(0), VAL_U128).unwrap();
         let got = mmu.peek_int::<u128>(VirtAddr(0)).unwrap();
         assert_eq!(got, VAL_U128 as u128);
+    }
+
+    #[test]
+    fn mmu_malloc_free() {
+        let mut mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
+        mmu.set_brk(VirtAddr(0));
+
+        let ptr1 = mmu.malloc(0x30, false).unwrap();
+        mmu.write(ptr1, &[0x41; 0x30]).unwrap();
+
+        let ptr2 = mmu.malloc(0x30, false).unwrap();
+        mmu.write(ptr2, &[0x41; 0x30]).unwrap();
+
+        mmu.free(ptr1).unwrap();
+        mmu.free(ptr2).unwrap();
+    }
+
+    #[test]
+    fn mmu_malloc_invalid_size() {
+        let mut mmu = Mmu::new(DIRTY_BLOCK_SIZE);
+        mmu.set_brk(VirtAddr(0));
+
+        match mmu.malloc(0x30, false) {
+            Err(Error::InvalidAddress { .. }) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
+    }
+
+    #[test]
+    fn mmu_malloc_oob() {
+        let mut mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
+        mmu.set_brk(VirtAddr(0));
+        let ptr = mmu.malloc(0x30, false).unwrap();
+        match mmu.write(ptr, &[0x41; 0x31]) {
+            Err(Error::WriteFault { .. }) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
+    }
+
+    #[test]
+    fn mmu_malloc_invalid_free() {
+        let mut mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
+        mmu.set_brk(VirtAddr(0));
+        let ptr = mmu.malloc(0x30, false).unwrap();
+        match mmu.free(VirtAddr(*ptr+1)) {
+            Err(Error::InvalidFree { .. }) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
+    }
+
+    #[test]
+    fn mmu_malloc_double_free() {
+        let mut mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
+        mmu.set_brk(VirtAddr(0));
+        let ptr = mmu.malloc(0x30, false).unwrap();
+        mmu.free(ptr).unwrap();
+        match mmu.free(ptr) {
+            Err(Error::InvalidFree { .. }) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
+    }
+
+    #[test]
+    fn mmu_malloc_uaf() {
+        let mut mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
+        mmu.set_brk(VirtAddr(0));
+        let ptr = mmu.malloc(0x30, false).unwrap();
+        mmu.free(ptr).unwrap();
+
+        match mmu.write(ptr, &[0x41; 1]) {
+            Err(Error::WriteFault { .. }) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
+    }
+
+    #[test]
+    fn mmu_malloc_raw() {
+        let mut mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
+        mmu.set_brk(VirtAddr(0));
+
+        let ptr = mmu.malloc(0x30, true).unwrap();
+
+        let want = vec![1, 2, 3, 4, 5];
+        mmu.write(ptr, &want).unwrap();
+
+        let mut got = vec![0; 5];
+        mmu.read(ptr, &mut got).unwrap();
+
+        mmu.free(ptr).unwrap();
+
+        assert_eq!(want, got);
+    }
+
+    #[test]
+    fn mmu_malloc_raw_uninit() {
+        let mut mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
+        mmu.set_brk(VirtAddr(0));
+
+        let ptr = mmu.malloc(0x30, true).unwrap();
+
+        let want = vec![1, 2, 3, 4, 5];
+        mmu.write(ptr, &want).unwrap();
+
+        let mut got = vec![0; 6];
+        match mmu.read(ptr, &mut got) {
+            Err(Error::UninitFault { .. }) => return,
+            Err(err) => panic!("Wrong error {:?}", err),
+            _ => panic!("The function didn't return an error"),
+        }
     }
 }
