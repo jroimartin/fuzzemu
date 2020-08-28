@@ -257,6 +257,8 @@ impl Mmu {
         if DEBUG_SANITY_CHECKS {
             assert_eq!(self.memory, other.memory);
             assert_eq!(self.perms, other.perms);
+            assert_eq!(self.dirty, Vec::new());
+            assert_eq!(self.dirty_bitmap, vec![0; other.dirty_bitmap.len()]);
             assert_eq!(self.active_allocs, other.active_allocs);
         }
     }
@@ -1163,7 +1165,7 @@ mod tests {
         let mut mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
         mmu.set_brk(VirtAddr(0));
         let ptr = mmu.malloc(0x30, false).unwrap();
-        match mmu.free(VirtAddr(*ptr+1)) {
+        match mmu.free(VirtAddr(*ptr + 1)) {
             Err(Error::InvalidFree { .. }) => return,
             Err(err) => panic!("Wrong error {:?}", err),
             _ => panic!("The function didn't return an error"),
