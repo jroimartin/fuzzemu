@@ -32,8 +32,8 @@ pub const PERM_RAW: u8 = 1 << 3;
 /// JIT compiler.
 pub const DIRTY_BLOCK_SIZE: usize = 1024;
 
-/// If `true`, extra sanity checks are performed. This causes a performance
-/// lost, so it should be enabled only for debugging purposes.
+/// If `true`, extra sanity checks are performed. This causes a lost in
+/// performance, so it should be enabled only for debugging purposes.
 const DEBUG_SANITY_CHECKS: bool = false;
 
 /// Memory error.
