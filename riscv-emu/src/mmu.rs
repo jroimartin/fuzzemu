@@ -502,6 +502,21 @@ impl Mmu {
         Ok(())
     }
 
+    /// Write an integer value into a given memory address. This function will
+    /// fail if the destination memory does not satisfy the expected
+    /// permissions.
+    pub fn write_int_with_perms<T: LeBytes>(
+        &mut self,
+        addr: VirtAddr,
+        value: T::Target,
+        perms: Perm,
+    ) -> Result<(), Error> {
+        let bytes = T::to_le_bytes(value);
+        let src = &bytes[..mem::size_of::<T::Target>()];
+        self.write_with_perms(addr, src, perms)?;
+        Ok(())
+    }
+
     /// Read the data starting at the specified memory address into an integer.
     /// This function will fail if the source memory is not readable.
     pub fn read_int<T: LeBytes>(
