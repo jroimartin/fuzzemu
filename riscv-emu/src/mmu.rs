@@ -32,6 +32,10 @@ pub const PERM_RAW: u8 = 1 << 3;
 /// JIT compiler.
 pub const DIRTY_BLOCK_SIZE: usize = 1024;
 
+/// If `true`, extra sanity checks are performed. This causes a performance
+/// lost, so it should be enabled only for debugging purposes.
+const DEBUG_SANITY_CHECKS: bool = false;
+
 /// Memory error.
 #[derive(Debug)]
 pub enum Error {
@@ -199,12 +203,15 @@ impl Mmu {
     pub fn new(size: usize) -> Mmu {
         assert!(size >= DIRTY_BLOCK_SIZE, "invalid size");
 
+        let dirty_size = (size + DIRTY_BLOCK_SIZE - 1) / DIRTY_BLOCK_SIZE;
+        let dirty_bitmap_size = dirty_size + 63 / 64;
+
         Mmu {
             size,
             memory: vec![0; size],
             perms: vec![Perm(0); size],
-            dirty: Vec::with_capacity(size / DIRTY_BLOCK_SIZE + 1),
-            dirty_bitmap: vec![0; size / DIRTY_BLOCK_SIZE / 64 + 1],
+            dirty: Vec::with_capacity(dirty_size),
+            dirty_bitmap: vec![0; dirty_bitmap_size],
             brk: VirtAddr(0),
             active_allocs: HashMap::new(),
         }
@@ -222,8 +229,8 @@ impl Mmu {
             size: self.size,
             memory: self.memory.clone(),
             perms: self.perms.clone(),
-            dirty: Vec::with_capacity(self.size / DIRTY_BLOCK_SIZE + 1),
-            dirty_bitmap: vec![0; self.size / DIRTY_BLOCK_SIZE / 64 + 1],
+            dirty: Vec::with_capacity(self.dirty.capacity()),
+            dirty_bitmap: vec![0; self.dirty_bitmap.len()],
             brk: self.brk,
             active_allocs: self.active_allocs.clone(),
         }
@@ -246,16 +253,32 @@ impl Mmu {
 
         self.active_allocs.clear();
         self.active_allocs.extend(other.active_allocs.iter());
-    }
 
-    /// Returns the length of the internal list of dirty blocks.
-    pub fn dirty_len(&self) -> usize {
-        self.dirty.len()
+        if DEBUG_SANITY_CHECKS {
+            assert_eq!(self.memory, other.memory);
+            assert_eq!(self.perms, other.perms);
+            assert_eq!(self.active_allocs, other.active_allocs);
+        }
     }
 
     /// Returns the length of the internal memory buffer.
     pub fn memory_len(&self) -> usize {
         self.memory.len()
+    }
+
+    /// Returns a raw pointer to the internal memory buffer.
+    pub fn memory_ptr(&self) -> *const u8 {
+        self.memory.as_ptr()
+    }
+
+    /// Returns the capacity of the internal list of dirty blocks.
+    pub fn dirty_capacity(&self) -> usize {
+        self.dirty.capacity()
+    }
+
+    /// Returns the length of the internal list of dirty blocks.
+    pub fn dirty_len(&self) -> usize {
+        self.dirty.len()
     }
 
     /// Sets the length of the internal list of dirty blocks.
@@ -267,16 +290,6 @@ impl Mmu {
         self.dirty.set_len(new_len)
     }
 
-    /// Returns a raw pointer to the internal memory buffer.
-    pub fn memory_ptr(&self) -> *const u8 {
-        self.memory.as_ptr()
-    }
-
-    /// Returns a raw pointer to the internal permissions buffer.
-    pub fn perms_ptr(&self) -> *const Perm {
-        self.perms.as_ptr()
-    }
-
     /// Returns a raw pointer to the internal list of dirty blocks.
     pub fn dirty_ptr(&self) -> *const usize {
         self.dirty.as_ptr()
@@ -285,6 +298,11 @@ impl Mmu {
     /// Returns a raw pointer to the internal bitmap of dirty blocks.
     pub fn dirty_bitmap_ptr(&self) -> *const u64 {
         self.dirty_bitmap.as_ptr()
+    }
+
+    /// Returns a raw pointer to the internal permissions buffer.
+    pub fn perms_ptr(&self) -> *const Perm {
+        self.perms.as_ptr()
     }
 
     /// Returns the current program break.
@@ -368,10 +386,23 @@ impl Mmu {
     /// Copy the bytes in `src` to the given memory address. This function will
     /// fail if the destination memory is not writable.
     pub fn write(&mut self, addr: VirtAddr, src: &[u8]) -> Result<(), Error> {
+        self.write_with_perms(addr, src, Perm(PERM_WRITE))
+    }
+
+    /// Copy the bytes in `src` to the given memory address. This function will
+    /// fail if the destination memory does not satisfy the expected
+    /// permissions. Memory marked as `PERM_RAW` will be marked as `PERM_READ`
+    /// only if `PERM_WRITE` is within the expected permissions.
+    pub fn write_with_perms(
+        &mut self,
+        addr: VirtAddr,
+        src: &[u8],
+        perms: Perm,
+    ) -> Result<(), Error> {
         let size = src.len();
 
         // Check if the destination memory range is writable.
-        self.check_perms(addr, size, Perm(PERM_WRITE))?;
+        self.check_perms(addr, size, perms)?;
 
         let end = *addr + size;
 
@@ -382,12 +413,14 @@ impl Mmu {
             .copy_from_slice(src);
 
         // Add PERM_READ and remove PERM_RAW in case of RAW.
-        self.perms
-            .get_mut(*addr..end)
-            .ok_or(Error::InvalidAddress { addr, size })?
-            .iter_mut()
-            .filter(|p| ***p & PERM_RAW != 0)
-            .for_each(|p| *p = Perm((**p | PERM_READ) & !PERM_RAW));
+        if *perms & PERM_WRITE != 0 {
+            self.perms
+                .get_mut(*addr..end)
+                .ok_or(Error::InvalidAddress { addr, size })?
+                .iter_mut()
+                .filter(|p| ***p & PERM_RAW != 0)
+                .for_each(|p| *p = Perm((**p | PERM_READ) & !PERM_RAW));
+        }
 
         self.update_dirty(addr, size);
 
@@ -425,38 +458,15 @@ impl Mmu {
     }
 
     /// Copy the bytes in `src` to the given memory address. This function
-    /// does not check memory permissions and does not mark memory as dirty.
+    /// does not check memory permissions.
     pub fn poke(&mut self, addr: VirtAddr, src: &[u8]) -> Result<(), Error> {
-        let size = src.len();
-
-        let end = addr
-            .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
-
-        self.memory
-            .get_mut(*addr..end)
-            .ok_or(Error::InvalidAddress { addr, size })?
-            .copy_from_slice(src);
-        Ok(())
+        self.write_with_perms(addr, src, Perm(0))
     }
 
     /// Copy the data starting at the specified memory address into `dst`.
     /// This function does not check memory permissions.
     pub fn peek(&self, addr: VirtAddr, dst: &mut [u8]) -> Result<(), Error> {
-        let size = dst.len();
-
-        let end = addr
-            .checked_add(size)
-            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
-
-        let src = self
-            .memory
-            .get(*addr..end)
-            .ok_or(Error::InvalidAddress { addr, size })?;
-
-        dst.copy_from_slice(src);
-
-        Ok(())
+        self.read_with_perms(addr, dst, Perm(0))
     }
 
     /// Compute dirty blocks and bitmap. It does not check if the memory range
@@ -518,8 +528,8 @@ impl Mmu {
         Ok(T::from_le_bytes(bytes))
     }
 
-    /// Write an integer value into a given memory address. This function will
-    /// This function does not check memory permissions.
+    /// Write an integer value into a given memory address. This function does
+    /// not check memory permissions.
     pub fn poke_int<T: LeBytes>(
         &mut self,
         addr: VirtAddr,
@@ -557,7 +567,7 @@ impl Mmu {
             size.checked_add(0xfff)
                 .ok_or(Error::AddressIntegerOverflow {
                     addr: self.brk,
-                    size: size,
+                    size,
                 })?
                 & !0xf;
 
@@ -652,14 +662,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mmu_new() {
-        let mmu = Mmu::new(DIRTY_BLOCK_SIZE);
+    fn mmu_new_edge_size_equal() {
+        let mmu = Mmu::new(2 * DIRTY_BLOCK_SIZE);
         let want = Mmu {
-            size: DIRTY_BLOCK_SIZE,
-            memory: vec![0; DIRTY_BLOCK_SIZE],
-            perms: vec![Perm(0); DIRTY_BLOCK_SIZE],
+            size: 2 * DIRTY_BLOCK_SIZE,
+            memory: vec![0; 2 * DIRTY_BLOCK_SIZE],
+            perms: vec![Perm(0); 2 * DIRTY_BLOCK_SIZE],
             dirty: vec![],
-            dirty_bitmap: vec![0; 1],
+            dirty_bitmap: vec![0; 2],
+            brk: VirtAddr(0),
+            active_allocs: HashMap::new(),
+        };
+
+        assert_eq!(mmu, want);
+    }
+
+    #[test]
+    fn mmu_new_edge_size_below() {
+        let mmu = Mmu::new(2 * DIRTY_BLOCK_SIZE - 1);
+        let want = Mmu {
+            size: 2 * DIRTY_BLOCK_SIZE - 1,
+            memory: vec![0; 2 * DIRTY_BLOCK_SIZE - 1],
+            perms: vec![Perm(0); 2 * DIRTY_BLOCK_SIZE - 1],
+            dirty: vec![],
+            dirty_bitmap: vec![0; 2],
+            brk: VirtAddr(0),
+            active_allocs: HashMap::new(),
+        };
+
+        assert_eq!(mmu, want);
+    }
+
+    #[test]
+    fn mmu_new_edge_size_above() {
+        let mmu = Mmu::new(2 * DIRTY_BLOCK_SIZE + 1);
+        let want = Mmu {
+            size: 2 * DIRTY_BLOCK_SIZE + 1,
+            memory: vec![0; 2 * DIRTY_BLOCK_SIZE + 1],
+            perms: vec![Perm(0); 2 * DIRTY_BLOCK_SIZE + 1],
+            dirty: vec![],
+            dirty_bitmap: vec![0; 3],
             brk: VirtAddr(0),
             active_allocs: HashMap::new(),
         };
@@ -907,18 +949,15 @@ mod tests {
 
     #[test]
     fn mmu_reset_one_of_two_blocks() {
-        let mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
+        let mut mmu = Mmu::new(1024 * DIRTY_BLOCK_SIZE);
+
+        mmu.poke(VirtAddr(DIRTY_BLOCK_SIZE - 2), &[1, 2]).unwrap();
+
         let mut mmu_fork = mmu.fork();
 
-        mmu_fork
-            .poke(VirtAddr(DIRTY_BLOCK_SIZE - 2), &[1, 2, 3, 4])
-            .unwrap();
-        mmu_fork
-            .set_perms(VirtAddr(1024), 2, Perm(PERM_WRITE))
-            .unwrap();
+        mmu_fork.poke(VirtAddr(DIRTY_BLOCK_SIZE), &[3, 4]).unwrap();
 
         let mut got = [0u8; 4];
-
         mmu_fork
             .peek(VirtAddr(DIRTY_BLOCK_SIZE - 2), &mut got)
             .unwrap();

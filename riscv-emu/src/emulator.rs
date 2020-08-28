@@ -1673,13 +1673,20 @@ impl Emulator {
 
                         .next_block:
 
-                        ; FIXME: Off-by-one.
-                        ;; Mark following block as dirty.
-                        ;add rcx, 1
-                        ;bts qword [r13], rcx
-                        ;jc .out
-                        ;mov qword [r12+8*r14], rcx
-                        ;add r14, 1
+                        ; Mark following block as dirty.
+                        add rcx, 1
+
+                        ; We have to check if the following block is still
+                        ; valid. The first one is already checked by the
+                        ; initial boundary checking. dirty_capacity is the
+                        ; maximum number of dirty blocks.
+                        cmp rcx, {dirty_capacity}
+                        jae .out
+
+                        bts qword [r13], rcx
+                        jc .out
+                        mov qword [r12+8*r14], rcx
+                        add r14, 1
                         jmp .out
 
                         .fault:
@@ -1698,6 +1705,7 @@ impl Emulator {
                     offset = offset as i32,
                     memory_len = self.mmu.memory_len(),
                     dirty_bs_shift = dirty_bs_shift,
+                    dirty_capacity = self.mmu.dirty_capacity(),
                     write_mask = write_mask,
                     raw_mask = raw_mask,
                     pc = pc

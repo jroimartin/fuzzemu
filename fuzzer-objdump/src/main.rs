@@ -924,23 +924,21 @@ fn calloc_r_cb(emu: &mut Emulator) -> Result<(), VmExit> {
 
     if nmemb == 0 || size == 0 {
         emu.set_reg(RegAlias::A0, 0)?;
-    } else {
-        if let Some(total_size) = nmemb.checked_mul(size) {
-            let addr = emu.mmu_mut().malloc(total_size, CHECK_RAW)?;
+    } else if let Some(total_size) = nmemb.checked_mul(size) {
+        let addr = emu.mmu_mut().malloc(total_size, CHECK_RAW)?;
 
-            // Set memory to zero.
-            let zeros = vec![0u8; total_size];
-            emu.mmu_mut().write(addr, &zeros)?;
+        // Set memory to zero.
+        let zeros = vec![0u8; total_size];
+        emu.mmu_mut().write(addr, &zeros)?;
 
-            if DEBUG {
-                println!("calloc: ret={}", addr);
-            }
-            emu.set_reg(RegAlias::A0, *addr as u64)?;
-        } else {
-            // If the multiplication of nmemb and size would result in integer
-            // overflow, then calloc() returns an error.
-            emu.set_reg(RegAlias::A0, 0)?;
+        if DEBUG {
+            println!("calloc: ret={}", addr);
         }
+        emu.set_reg(RegAlias::A0, *addr as u64)?;
+    } else {
+        // If the multiplication of nmemb and size would result in integer
+        // overflow, then calloc() returns an error.
+        emu.set_reg(RegAlias::A0, 0)?;
     }
 
     emu.set_reg(RegAlias::Pc, emu.reg(RegAlias::Ra)?)?;
@@ -968,33 +966,31 @@ fn realloc_r_cb(emu: &mut Emulator) -> Result<(), VmExit> {
             }
             emu.set_reg(RegAlias::A0, *addr as u64)?;
         }
-    } else {
-        if size == 0 {
-            // Equivalent to free.
-            if *ptr != 0 {
-                emu.mmu_mut().free(ptr)?;
-            }
-        } else {
-            // Free old memory.
-            let old_size = emu.mmu_mut().free(ptr)?;
-
-            // Calculate the amount of data to copy.
-            let copy_size = cmp::min(old_size, size as usize);
-
-            // Copy old data.
-            let mut old_data = vec![0u8; copy_size];
-            emu.mmu().peek(ptr, &mut old_data)?;
-
-            // Allocate new memory and copy old data.
-            let addr = emu.mmu_mut().malloc(size as usize, CHECK_RAW)?;
-            emu.mmu_mut().write(addr, &old_data)?;
-
-            // Return new address.
-            if DEBUG {
-                println!("realloc: ret={}", addr);
-            }
-            emu.set_reg(RegAlias::A0, *addr as u64)?;
+    } else if size == 0 {
+        // Equivalent to free.
+        if *ptr != 0 {
+            emu.mmu_mut().free(ptr)?;
         }
+    } else {
+        // Free old memory.
+        let old_size = emu.mmu_mut().free(ptr)?;
+
+        // Calculate the amount of data to copy.
+        let copy_size = cmp::min(old_size, size as usize);
+
+        // Copy old data.
+        let mut old_data = vec![0u8; copy_size];
+        emu.mmu().peek(ptr, &mut old_data)?;
+
+        // Allocate new memory and copy old data.
+        let addr = emu.mmu_mut().malloc(size as usize, CHECK_RAW)?;
+        emu.mmu_mut().write(addr, &old_data)?;
+
+        // Return new address.
+        if DEBUG {
+            println!("realloc: ret={}", addr);
+        }
+        emu.set_reg(RegAlias::A0, *addr as u64)?;
     }
 
     emu.set_reg(RegAlias::Pc, emu.reg(RegAlias::Ra)?)?;
