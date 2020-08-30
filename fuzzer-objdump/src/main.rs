@@ -972,19 +972,30 @@ fn realloc_r_cb(emu: &mut Emulator) -> Result<(), VmExit> {
             emu.mmu_mut().free(ptr)?;
         }
     } else {
-        // Free old memory.
-        let old_size = emu.mmu_mut().free(ptr)?;
+        // Get the size of the realloced memory.
+        let old_size = emu
+            .mmu()
+            .alloc_size(ptr)
+            .ok_or(mmu::Error::InvalidFree { addr: ptr })?;
 
         // Calculate the amount of data to copy.
-        let copy_size = cmp::min(old_size, size as usize);
-
-        // Copy old data.
-        let mut old_data = vec![0u8; copy_size];
-        emu.mmu().peek(ptr, &mut old_data)?;
+        let copy_size = cmp::min(old_size, size);
 
         // Allocate new memory and copy old data.
-        let addr = emu.mmu_mut().malloc(size as usize, CHECK_RAW)?;
-        emu.mmu_mut().write(addr, &old_data)?;
+        let addr = emu.mmu_mut().malloc(size, false)?;
+        let mut old_data = vec![0u8; copy_size];
+        emu.mmu().peek(ptr, &mut old_data)?;
+        emu.mmu_mut().poke(addr, &old_data)?;
+
+        // Copy old permissions.
+        let old_perms = emu.mmu().perms(ptr, copy_size)?.to_vec();
+        for (offset, perms) in old_perms.iter().enumerate() {
+            emu.mmu_mut()
+                .set_perms(VirtAddr(*addr + offset), 1, *perms)?;
+        }
+
+        // Free old memory.
+        emu.mmu_mut().free(ptr)?;
 
         // Return new address.
         if DEBUG {

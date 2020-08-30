@@ -339,6 +339,22 @@ impl Mmu {
         Ok(())
     }
 
+    /// Returns a slice with the permissions of the memory range
+    /// (`addr`..`addr` + `size`).
+    pub fn perms(
+        &self,
+        addr: VirtAddr,
+        size: usize,
+    ) -> Result<&[Perm], Error> {
+        let end = addr
+            .checked_add(size)
+            .ok_or(Error::AddressIntegerOverflow { addr, size })?;
+
+        self.perms
+            .get(*addr..end)
+            .ok_or(Error::InvalidAddress { addr, size })
+    }
+
     /// Given a memory range and the expected permissions, this function will
     /// return true if every byte in the specified region satisfies those
     /// permissions. Otherwise, the function will return false.
@@ -613,17 +629,27 @@ impl Mmu {
     }
 
     /// Strict memory free.
-    pub fn free(&mut self, addr: VirtAddr) -> Result<usize, Error> {
+    pub fn free(&mut self, addr: VirtAddr) -> Result<(), Error> {
         if let Some(size) = self.active_allocs.remove(&addr) {
             // The permissions of the freed memory are set to 0, which allows
             // to detect UAF.
             self.set_perms(addr, size, Perm(0))?;
-            Ok(size)
+            Ok(())
         } else {
             // If the address is not in the list of active allocations, this is
             // an invalid free. This can happen due to a double free or a
             // corrupted heap.
             Err(Error::InvalidFree { addr })
+        }
+    }
+
+    /// Returns the size of the allocation corresponding to the virtual address
+    /// `addr`.
+    pub fn alloc_size(&self, addr: VirtAddr) -> Option<usize> {
+        if let Some(&size) = self.active_allocs.get(&addr) {
+            Some(size)
+        } else {
+            None
         }
     }
 }
