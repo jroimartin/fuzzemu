@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "riscv-emu",
+    "xorshift",
     "nasm",
     "fuzzer-objdump",
 ]

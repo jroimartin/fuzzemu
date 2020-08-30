@@ -174,27 +174,6 @@ impl UniqueCrash {
     }
 }
 
-/// Xorshift pseudorandom number generator.
-struct Rng(u64);
-
-impl Rng {
-    /// Returns a new Xorshift PRNG.
-    fn new() -> Rng {
-        Rng(0x5273e95b7c721b5a ^ rdtsc())
-    }
-
-    /// Returns the next random number.
-    fn rand(&mut self) -> usize {
-        let val = self.0;
-
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-
-        val as usize
-    }
-}
-
 /// Statistics recorded during the fuzzing session.
 #[derive(Default)]
 struct Stats {
@@ -281,7 +260,7 @@ struct Fuzzer {
     input_file: InputFile,
 
     /// Random number generator.
-    rng: Rng,
+    rng: xorshift::Rng,
 }
 
 impl Fuzzer {
@@ -307,7 +286,7 @@ impl Fuzzer {
                 contents: Vec::new(),
                 cursor: 0,
             },
-            rng: Rng::new(),
+            rng: xorshift::Rng::new(0x5273e95b7c721b5a ^ rdtsc()),
         }
     }
 

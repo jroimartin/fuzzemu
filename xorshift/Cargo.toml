@@ -1,5 +1,5 @@
 [package]
-name = "fuzzer-objdump"
+name = "xorshift"
 version = "0.1.0"
 authors = ["Roi Martin <jroi.martin@gmail.com>"]
 edition = "2018"
@@ -8,5 +8,3 @@ publish = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-riscv-emu = { path = "../riscv-emu" }
-xorshift = { path = "../xorshift" }
