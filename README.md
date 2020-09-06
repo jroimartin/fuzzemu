@@ -1,4 +1,4 @@
-# riscv-emu
+# fuzzemu
 
 This project is just me trying to replicate the work done by **Brandon Falk**
 during the **Fuzz Week** for learning purposes and experimentation.
