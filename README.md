@@ -24,7 +24,7 @@ $ make -j <NJOBS>
 ### Perf
 
 ```
-$ sudo perf record --call-graph=dwarf ./target/release/riscv-emu
+$ sudo perf record --call-graph=dwarf ./target/release/fuzzer-objdump
 $ sudo perf report --hierarchy -M intel
 ```
 
@@ -37,6 +37,6 @@ $ sudo perf top
 ### Valgrind
 
 ```
-$ valgrind --tool=callgrind ./target/release/riscv-emu
+$ valgrind --tool=callgrind ./target/release/fuzzer-objdump
 $ callgrind_annotate --tree=both --inclusive=yes callgrind.out.<pid>  # or KCachegrind
 ```
