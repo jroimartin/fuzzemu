@@ -211,6 +211,7 @@ fn rdtsc() -> u64 {
 }
 
 /// InputFile represents the file opened by objdump.
+#[derive(Clone)]
 struct InputFile {
     /// Contents of the file.
     contents: Vec<u8>,
@@ -286,7 +287,7 @@ impl Fuzzer {
                 contents: Vec::new(),
                 cursor: 0,
             },
-            rng: xorshift::Rng::new(0x5273e95b7c721b5a ^ rdtsc()),
+            rng: xorshift::Rng::new(0x5273e95b7c721b5a),
         }
     }
 
@@ -296,6 +297,42 @@ impl Fuzzer {
         self.input_file_is_open = false;
         self.input_file.contents.clear();
         self.input_file.cursor = 0;
+    }
+
+    /// Returns a copy of the fuzzer instance.
+    fn fork(&self) -> Fuzzer {
+        Fuzzer {
+            emu_init: Arc::new(self.emu.fork()),
+            emu: self.emu.fork(),
+            coverage: Arc::clone(&self.coverage),
+            corpus: Arc::clone(&self.corpus),
+            unique_crashes: Arc::clone(&self.unique_crashes),
+            stats: Arc::clone(&self.stats),
+            input_file_is_open: self.input_file_is_open,
+            input_file: self.input_file.clone(),
+            rng: xorshift::Rng::new(0x5273e95b7c721b5a ^ rdtsc()),
+        }
+    }
+
+    /// Take a snapshot at the specified address.
+    fn take_snapshot(&mut self, addr: VirtAddr) -> Result<(), FuzzExit> {
+        self.input_file.contents = vec![0; 16];
+        loop {
+            let mut trace = Trace::default();
+            let run_result = self.emu.run_emu_until(&mut trace, Some(addr));
+            match run_result {
+                Err(VmExit::UserBreakpoint) => return Ok(()),
+                Err(VmExit::Ecall) => {
+                    if let Err(err) = self.syscall_dispatcher() {
+                        break Err(err);
+                    } else {
+                        continue;
+                    }
+                }
+                Err(err) => break Err(err.into()),
+                _ => unreachable!(),
+            }
+        }
     }
 
     /// Start a fuzzer worker. Normally, one fuzzer per core is spawned.
@@ -1041,6 +1078,21 @@ fn main() {
     let unique_crashes = Arc::new(Mutex::new(HashSet::new()));
     let stats = Arc::new(Mutex::new(Stats::default()));
 
+    // Create a base fuzzer instance and take a snapshot.
+    let mut fuzzer = Fuzzer::new(
+        Arc::clone(&emu_init),
+        Arc::clone(&coverage),
+        Arc::clone(&corpus),
+        Arc::clone(&unique_crashes),
+        Arc::clone(&stats),
+    );
+    //000000000012af04 <_open>:
+    // ...
+    // 12af1c:	40000893          	li	a7,1024
+    // 12af20:	00000073          	ecall
+    fuzzer.take_snapshot(VirtAddr(0x12af20)).expect("could not take snapshot");
+    eprintln!("took snapshot");
+
     // Get the current time to calculate statistics.
     let start = Instant::now();
 
@@ -1048,15 +1100,7 @@ fn main() {
     let num_threads = if DEBUG_ONE { 1 } else { NUM_THREADS };
 
     for _ in 0..num_threads {
-        let emu_init = Arc::clone(&emu_init);
-        let coverage = Arc::clone(&coverage);
-        let corpus = Arc::clone(&corpus);
-        let unique_crashes = Arc::clone(&unique_crashes);
-        let stats = Arc::clone(&stats);
-
-        let fuzzer =
-            Fuzzer::new(emu_init, coverage, corpus, unique_crashes, stats);
-
+        let fuzzer = fuzzer.fork();
         thread::spawn(move || fuzzer.go());
     }
 

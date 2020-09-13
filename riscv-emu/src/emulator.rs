@@ -29,6 +29,8 @@ pub enum VmExit {
     Ebreak,
     Ecall,
 
+    UserBreakpoint,
+
     AddressMisaligned,
     InvalidInstruction,
     InvalidRegister,
@@ -48,6 +50,7 @@ impl fmt::Display for VmExit {
         match self {
             VmExit::Ebreak => write!(f, "EBREAK"),
             VmExit::Ecall => write!(f, "ECALL"),
+            VmExit::UserBreakpoint => write!(f, "user breakpoint"),
             VmExit::AddressMisaligned => {
                 write!(f, "address-missaligned exception")
             }
@@ -326,6 +329,7 @@ impl From<u32> for Jtype {
 }
 
 /// An execution trace.
+#[derive(Default)]
 pub struct Trace {
     /// Number of executed instructions.
     pub inst_execed: u64,
@@ -531,8 +535,24 @@ impl Emulator {
 
     /// Run code using pure emulation.
     pub fn run_emu(&mut self, trace: &mut Trace) -> Result<(), VmExit> {
+        self.run_emu_until(trace, None)
+    }
+
+    /// Run code using pure emulation. If `until` is not `None`, stop at the
+    /// specified address.
+    pub fn run_emu_until(
+        &mut self,
+        trace: &mut Trace,
+        until: Option<VirtAddr>,
+    ) -> Result<(), VmExit> {
         loop {
             let pc = self.reg(RegAlias::Pc)?;
+
+            if let Some(until) = until {
+                if pc as usize == *until {
+                    return Err(VmExit::UserBreakpoint);
+                }
+            }
 
             if let Some(hook_callback) = self.hooks.get(&VirtAddr(pc as usize))
             {
