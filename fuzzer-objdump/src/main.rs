@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use riscv_emu::emulator::{Emulator, RegAlias, Trace, VmExit};
+use riscv_emu::emulator::{Emulator, RegAlias, VmExit};
 use riscv_emu::jit::JitCache;
 use riscv_emu::mmu::{self, Mmu, Perm, VirtAddr, PERM_READ, PERM_WRITE};
 
@@ -221,10 +221,8 @@ struct InputFile {
 }
 
 /// Profiling information for one fuzz case.
+#[derive(Default)]
 struct Profile {
-    /// Emulator trace.
-    emu_trace: Trace,
-
     /// Number of cycles expent in the VM.
     vm_cycles: u64,
 
@@ -318,8 +316,7 @@ impl Fuzzer {
     fn take_snapshot(&mut self, addr: VirtAddr) -> Result<(), FuzzExit> {
         self.input_file.contents = vec![0; 16];
         loop {
-            let mut trace = Trace::default();
-            let run_result = self.emu.run_emu_until(&mut trace, Some(addr));
+            let run_result = self.emu.run_emu_until(addr);
             match run_result {
                 Err(VmExit::UserBreakpoint) => return Ok(()),
                 Err(VmExit::Ecall) => {
@@ -354,14 +351,7 @@ impl Fuzzer {
                 let mutation_cycles = rdtsc() - mutation_start;
 
                 // Run the target and handle the result.
-                let mut profile = Profile {
-                    emu_trace: Trace {
-                        inst_execed: 0,
-                        coverage: HashSet::new(),
-                    },
-                    vm_cycles: 0,
-                    syscall_cycles: 0,
-                };
+                let mut profile = Profile::default();
                 let fcexit = self.run_fc(&mut profile);
 
                 self.handle_fcexit(fcexit, &mut local_stats);
@@ -370,18 +360,19 @@ impl Fuzzer {
                     panic!("DEBUG_ONE is enabled");
                 }
 
+                let emu_coverage = self.emu.coverage();
+
                 // Update local stats.
                 local_stats.fuzz_cases += 1;
-                local_stats.total_inst += profile.emu_trace.inst_execed;
+                local_stats.total_inst += emu_coverage.inst_execed;
                 local_stats.vm_cycles += profile.vm_cycles;
                 local_stats.syscall_cycles += profile.syscall_cycles;
                 local_stats.mutation_cycles += mutation_cycles;
 
                 // Update coverage.
                 let mut coverage = self.coverage.lock().unwrap();
-                let new_coverage = profile
-                    .emu_trace
-                    .coverage
+                let new_coverage = emu_coverage
+                    .pcs
                     .iter()
                     .fold(false, |acc, addr| acc | coverage.insert(*addr));
 
@@ -433,7 +424,7 @@ impl Fuzzer {
     fn run_fc(&mut self, profile: &mut Profile) -> FuzzExit {
         loop {
             let vm_start = rdtsc();
-            let run_result = self.emu.run(&mut profile.emu_trace);
+            let run_result = self.emu.run();
             profile.vm_cycles += rdtsc() - vm_start;
 
             match run_result {

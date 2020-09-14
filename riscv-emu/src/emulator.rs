@@ -328,14 +328,14 @@ impl From<u32> for Jtype {
     }
 }
 
-/// An execution trace.
-#[derive(Default)]
-pub struct Trace {
+/// Execution converage.
+#[derive(Clone, Default)]
+pub struct Coverage {
     /// Number of executed instructions.
     pub inst_execed: u64,
 
-    /// Number of executed PCs.
-    pub coverage: HashSet<VirtAddr>,
+    /// Number of visited PCs.
+    pub pcs: HashSet<VirtAddr>,
 }
 
 /// A callback called by a hook.
@@ -359,6 +359,9 @@ pub struct Emulator {
     /// User defined hooks. The callback will be called just before the
     /// instruction at the specific virtual address is executed.
     hooks: HashMap<VirtAddr, HookCallback>,
+
+    /// Coverage information.
+    coverage: Coverage,
 }
 
 impl fmt::Display for Emulator {
@@ -391,6 +394,7 @@ impl Emulator {
             mmu,
             jit_cache: None,
             hooks: HashMap::new(),
+            coverage: Coverage::default(),
         }
     }
 
@@ -402,6 +406,11 @@ impl Emulator {
     /// Returns a mutable reference to the internal MMU of the emulator.
     pub fn mmu_mut(&mut self) -> &mut Mmu {
         &mut self.mmu
+    }
+
+    /// Returns the coverage information.
+    pub fn coverage(&self) -> &Coverage {
+        &self.coverage
     }
 
     /// Returns a copy of the Emulator, including its internal state.
@@ -417,6 +426,7 @@ impl Emulator {
             mmu: self.mmu.fork(),
             jit_cache,
             hooks: self.hooks.clone(),
+            coverage: self.coverage.clone(),
         }
     }
 
@@ -424,6 +434,9 @@ impl Emulator {
     pub fn reset(&mut self, other: &Emulator) {
         self.regs = other.regs;
         self.mmu.reset(&other.mmu);
+        self.coverage.inst_execed = other.coverage.inst_execed;
+        self.coverage.pcs.clear();
+        self.coverage.pcs.extend(other.coverage.pcs.iter());
     }
 
     /// Enable JIT compilation. `cache` is the JIT cache used to store the
@@ -524,25 +537,29 @@ impl Emulator {
         self.hooks.insert(addr, cb);
     }
 
-    /// Run until vm exit or error. It returns the execution trace in `trace`.
-    pub fn run(&mut self, trace: &mut Trace) -> Result<(), VmExit> {
+    /// Run until vm exit or error.
+    pub fn run(&mut self) -> Result<(), VmExit> {
         if self.jit_cache.is_some() {
-            self.run_jit(trace)
+            self.run_jit()
         } else {
-            self.run_emu(trace)
+            self.run_emu()
         }
     }
 
     /// Run code using pure emulation.
-    pub fn run_emu(&mut self, trace: &mut Trace) -> Result<(), VmExit> {
-        self.run_emu_until(trace, None)
+    pub fn run_emu(&mut self) -> Result<(), VmExit> {
+        self.run_emu_internal(None)
+    }
+
+    /// Run code using pure emulation until reaching address `until`.
+    pub fn run_emu_until(&mut self, until: VirtAddr) -> Result<(), VmExit> {
+        self.run_emu_internal(Some(until))
     }
 
     /// Run code using pure emulation. If `until` is not `None`, stop at the
     /// specified address.
-    pub fn run_emu_until(
+    fn run_emu_internal(
         &mut self,
-        trace: &mut Trace,
         until: Option<VirtAddr>,
     ) -> Result<(), VmExit> {
         loop {
@@ -575,15 +592,15 @@ impl Emulator {
                 Perm(PERM_EXEC),
             )?;
 
-            if trace.inst_execed > TIMEOUT {
+            if self.coverage.inst_execed > TIMEOUT {
                 return Err(VmExit::Timeout);
             }
 
             self.emulate_instruction(pc, inst)?;
 
-            // Update trace.
-            trace.inst_execed += 1;
-            trace.coverage.insert(VirtAddr(pc as usize));
+            // Update coverage.
+            self.coverage.inst_execed += 1;
+            self.coverage.pcs.insert(VirtAddr(pc as usize));
         }
     }
 
@@ -1127,7 +1144,7 @@ impl Emulator {
     /// - `rdx`: Extra information.
     /// - `r8`: Updated number of executed instructions.
     /// - `r14`: Updated Mmu dirty len.
-    pub fn run_jit(&mut self, trace: &mut Trace) -> Result<(), VmExit> {
+    pub fn run_jit(&mut self) -> Result<(), VmExit> {
         let mut pc = self.reg(RegAlias::Pc)?;
         let mut hook_reentry = None;
 
@@ -1153,7 +1170,7 @@ impl Emulator {
                     ptr
                 } else {
                     let block =
-                        self.lift_block(pc, lookup_table_len, trace)?;
+                        self.lift_block(pc, lookup_table_len)?;
 
                     let mut jit_cache =
                         self.jit_cache.as_ref().unwrap().lock().unwrap();
@@ -1174,7 +1191,7 @@ impl Emulator {
             let mut dirty_len = self.mmu.dirty_len();
             let perms_ptr = self.mmu.perms_ptr();
 
-            let mut inst_execed = trace.inst_execed;
+            let mut inst_execed = self.coverage.inst_execed;
 
             let jit_exit: u64;
             let next_pc: u64;
@@ -1206,8 +1223,8 @@ impl Emulator {
                 );
             }
 
-            // Update trace.
-            trace.inst_execed = inst_execed;
+            // Update coverage.
+            self.coverage.inst_execed = inst_execed;
 
             // Update the length of the list of dirty blocks with the new
             // value.
@@ -1282,7 +1299,6 @@ impl Emulator {
         &mut self,
         pc: u64,
         lookup_table_len: usize,
-        trace: &mut Trace,
     ) -> Result<Vec<u8>, VmExit> {
         let mut block_code = String::new();
         let mut cur_pc = pc;
@@ -1297,8 +1313,8 @@ impl Emulator {
                 Perm(PERM_EXEC),
             )?;
 
-            // Update trace.
-            trace.coverage.insert(VirtAddr(cur_pc as usize));
+            // Update coverage.
+            self.coverage.pcs.insert(VirtAddr(cur_pc as usize));
 
             match self.lift_instruction(cur_pc, inst, lookup_table_len) {
                 Ok((inst_code, end)) => {
