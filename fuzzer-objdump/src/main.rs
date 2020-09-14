@@ -1111,7 +1111,7 @@ fn main() {
 
     // Load the program file.
     load_program(&mut emu_init, "test-targets/binutils/objdump-2.35-riscv")
-        .expect("could not create emulator");
+        .expect("could not load target program");
 
     // Set up the stack.
     setup_stack(&mut emu_init).expect("could not set up the stack");
