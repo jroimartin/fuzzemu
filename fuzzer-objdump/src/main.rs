@@ -314,7 +314,9 @@ impl Fuzzer {
 
     /// Take a snapshot at the specified address.
     fn take_snapshot(&mut self, addr: VirtAddr) -> Result<(), FuzzExit> {
+        // Input file size must be bigger than 0 to pass objdump checks.
         self.input_file.contents = vec![0; 16];
+
         loop {
             let run_result = self.emu.run_emu_until(addr);
             match run_result {
@@ -1082,7 +1084,6 @@ fn main() {
     // 12af1c:	40000893          	li	a7,1024
     // 12af20:	00000073          	ecall
     fuzzer.take_snapshot(VirtAddr(0x12af20)).expect("could not take snapshot");
-    eprintln!("took snapshot");
 
     // Get the current time to calculate statistics.
     let start = Instant::now();
