@@ -1,16 +1,11 @@
 //! RISC-V emulator. This implementation only supports the RV64i Base Integer
 //! Instruction Set and assumes little-endian.
 
-use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fs;
-use std::io;
 use std::ops::Deref;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::elf::{self, Elf};
 use crate::jit::{self, JitCache};
 use crate::mmu::{
     self, Mmu, Perm, VirtAddr, DIRTY_BLOCK_SIZE, PERM_EXEC, PERM_RAW,
@@ -34,12 +29,9 @@ pub enum VmExit {
     AddressMisaligned,
     InvalidInstruction,
     InvalidRegister,
-    InvalidMemorySegment,
     UnimplementedInstruction,
     Timeout,
 
-    IoError(io::Error),
-    ElfError(elf::Error),
     MmuError(mmu::Error),
     NasmError(nasm::Error),
     JitError(jit::Error),
@@ -56,31 +48,14 @@ impl fmt::Display for VmExit {
             }
             VmExit::InvalidInstruction => write!(f, "invalid instruction"),
             VmExit::InvalidRegister => write!(f, "invalid register"),
-            VmExit::InvalidMemorySegment => {
-                write!(f, "invalid memory segment")
-            }
             VmExit::UnimplementedInstruction => {
                 write!(f, "unimplemented instruction")
             }
             VmExit::Timeout => write!(f, "timeout"),
-            VmExit::IoError(err) => write!(f, "IO error: {}", err),
-            VmExit::ElfError(err) => write!(f, "ELF error: {}", err),
             VmExit::MmuError(err) => write!(f, "MMU error: {}", err),
             VmExit::NasmError(err) => write!(f, "Nasm error: {}", err),
             VmExit::JitError(err) => write!(f, "JIT error: {}", err),
         }
-    }
-}
-
-impl From<io::Error> for VmExit {
-    fn from(error: io::Error) -> VmExit {
-        VmExit::IoError(error)
-    }
-}
-
-impl From<elf::Error> for VmExit {
-    fn from(error: elf::Error) -> VmExit {
-        VmExit::ElfError(error)
     }
 }
 
@@ -446,54 +421,6 @@ impl Emulator {
 
         self.jit_cache = Some(cache);
         self
-    }
-
-    /// Loads an ELF program in the emulator. It also points the program
-    /// counter to the entrypoint of the program and sets the program break.
-    pub fn load_program<P: AsRef<Path>>(
-        &mut self,
-        program: P,
-    ) -> Result<(), VmExit> {
-        let contents = fs::read(program)?;
-        let elf = Elf::parse(&contents)?;
-
-        let mut max_addr = 0;
-
-        for phdr in elf.phdrs() {
-            let file_offset = phdr.offset();
-            let file_end = file_offset
-                .checked_add(phdr.file_size())
-                .ok_or(VmExit::InvalidMemorySegment)?;
-
-            let file_bytes = contents
-                .get(file_offset..file_end)
-                .ok_or(VmExit::InvalidMemorySegment)?;
-
-            let mem_start = phdr.virt_addr();
-            let mem_size = phdr.mem_size();
-
-            self.mmu.poke(mem_start, file_bytes)?;
-            self.mmu.set_perms(mem_start, mem_size, phdr.perms())?;
-
-            // checked_add() is not needed here because integer overflows have
-            // been already checked in the previous call to set_perms().
-            let mem_end = *mem_start + mem_size;
-
-            max_addr = cmp::max(max_addr, mem_end);
-        }
-
-        // Place the program counter in the entrypoint.
-        self.set_reg(RegAlias::Pc, *elf.entry() as u64)?;
-
-        // Set the program break to point just after the end of the process's
-        // memory. 16-byte aligned.
-        let max_addr_aligned = max_addr
-            .checked_add(0xf)
-            .ok_or(VmExit::InvalidMemorySegment)?
-            & !0xf;
-        self.mmu.set_brk(VirtAddr(max_addr_aligned));
-
-        Ok(())
     }
 
     /// Sets the value of the register `reg` to `val`.
@@ -1169,8 +1096,7 @@ impl Emulator {
                 if let Some(ptr) = block_lookup {
                     ptr
                 } else {
-                    let block =
-                        self.lift_block(pc, lookup_table_len)?;
+                    let block = self.lift_block(pc, lookup_table_len)?;
 
                     let mut jit_cache =
                         self.jit_cache.as_ref().unwrap().lock().unwrap();

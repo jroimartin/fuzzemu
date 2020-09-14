@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use riscv_emu::elf::{self, Elf};
 use riscv_emu::emulator::{Emulator, RegAlias, VmExit};
 use riscv_emu::jit::JitCache;
 use riscv_emu::mmu::{self, Mmu, Perm, VirtAddr, PERM_READ, PERM_WRITE};
@@ -61,15 +62,25 @@ const LOG_FILENAME: &str = "test-targets/fuzzer-objdump.log";
 /// Fuzzer's exit reason.
 #[derive(Debug)]
 enum FuzzExit {
+    InvalidMemorySegment,
+
     ProgramExit(u64),
     VmExit(VmExit),
+
+    ElfError(elf::Error),
+    IoError(io::Error),
 }
 
 impl fmt::Display for FuzzExit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            FuzzExit::InvalidMemorySegment => {
+                write!(f, "invalid memory segment")
+            }
             FuzzExit::ProgramExit(code) => write!(f, "program exit: {}", code),
             FuzzExit::VmExit(vmexit) => write!(f, "VM exit: {}", vmexit),
+            FuzzExit::ElfError(err) => write!(f, "ELF error: {}", err),
+            FuzzExit::IoError(err) => write!(f, "IO error: {}", err),
         }
     }
 }
@@ -83,6 +94,18 @@ impl From<mmu::Error> for FuzzExit {
 impl From<VmExit> for FuzzExit {
     fn from(vmexit: VmExit) -> FuzzExit {
         FuzzExit::VmExit(vmexit)
+    }
+}
+
+impl From<elf::Error> for FuzzExit {
+    fn from(err: elf::Error) -> FuzzExit {
+        FuzzExit::ElfError(err)
+    }
+}
+
+impl From<io::Error> for FuzzExit {
+    fn from(err: io::Error) -> FuzzExit {
+        FuzzExit::IoError(err)
     }
 }
 
@@ -493,6 +516,7 @@ impl Fuzzer {
                 }
                 _ => panic!("Unexpected VmExit error: {}", vmexit),
             },
+            _ => panic!("Unexpected FuzzExit error: {}", fcexit),
         };
 
         stats.crashes += 1;
@@ -840,6 +864,54 @@ impl Fuzzer {
     }
 }
 
+/// Loads an ELF program in the emulator. It also points the program
+/// counter to the entrypoint of the program and sets the program break.
+fn load_program<P: AsRef<Path>>(
+    emu: &mut Emulator,
+    program: P,
+) -> Result<(), FuzzExit> {
+    let contents = fs::read(program)?;
+    let elf = Elf::parse(&contents)?;
+
+    let mut max_addr = 0;
+
+    for phdr in elf.phdrs() {
+        let file_offset = phdr.offset();
+        let file_end = file_offset
+            .checked_add(phdr.file_size())
+            .ok_or(FuzzExit::InvalidMemorySegment)?;
+
+        let file_bytes = contents
+            .get(file_offset..file_end)
+            .ok_or(FuzzExit::InvalidMemorySegment)?;
+
+        let mem_start = phdr.virt_addr();
+        let mem_size = phdr.mem_size();
+
+        emu.mmu_mut().poke(mem_start, file_bytes)?;
+        emu.mmu_mut().set_perms(mem_start, mem_size, phdr.perms())?;
+
+        // checked_add() is not needed here because integer overflows have
+        // been already checked in the previous call to set_perms().
+        let mem_end = *mem_start + mem_size;
+
+        max_addr = cmp::max(max_addr, mem_end);
+    }
+
+    // Place the program counter in the entrypoint.
+    emu.set_reg(RegAlias::Pc, *elf.entry() as u64)?;
+
+    // Set the program break to point just after the end of the process's
+    // memory. 16-byte aligned.
+    let max_addr_aligned = max_addr
+        .checked_add(0xf)
+        .ok_or(FuzzExit::InvalidMemorySegment)?
+        & !0xf;
+    emu.mmu_mut().set_brk(VirtAddr(max_addr_aligned));
+
+    Ok(())
+}
+
 /// Set up a stack with a size of `STACK_SIZE` bytes. It also configures
 /// the command line argumets passed to the program.
 ///
@@ -1038,8 +1110,7 @@ fn main() {
     let mut emu_init = Emulator::new(mmu);
 
     // Load the program file.
-    emu_init
-        .load_program("test-targets/binutils/objdump-2.35-riscv")
+    load_program(&mut emu_init, "test-targets/binutils/objdump-2.35-riscv")
         .expect("could not create emulator");
 
     // Set up the stack.
@@ -1084,7 +1155,9 @@ fn main() {
     // ...
     // 12af1c:	40000893          	li	a7,1024
     // 12af20:	00000073          	ecall
-    fuzzer.take_snapshot(VirtAddr(0x12af20)).expect("could not take snapshot");
+    fuzzer
+        .take_snapshot(VirtAddr(0x12af20))
+        .expect("could not take snapshot");
 
     // Get the current time to calculate statistics.
     let start = Instant::now();
