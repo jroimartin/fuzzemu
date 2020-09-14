@@ -234,7 +234,7 @@ struct Profile {
 /// for instance, memory allocation, file handling, statistics, etc.
 struct Fuzzer {
     /// Initial state of the emulator.
-    emu_init: Arc<Emulator>,
+    emu_init: Emulator,
 
     /// Current state of the emulator.
     emu: Emulator,
@@ -265,7 +265,7 @@ struct Fuzzer {
 impl Fuzzer {
     /// Returns a new fuzzer instance.
     fn new(
-        emu_init: Arc<Emulator>,
+        emu_init: Emulator,
         coverage: Arc<Mutex<HashSet<VirtAddr>>>,
         corpus: Arc<Mutex<HashSet<Vec<u8>>>>,
         unique_crashes: Arc<Mutex<HashSet<UniqueCrash>>>,
@@ -300,8 +300,9 @@ impl Fuzzer {
     /// Returns a copy of the fuzzer instance.
     fn fork(&self) -> Fuzzer {
         Fuzzer {
-            emu_init: Arc::new(self.emu.fork()),
+            emu_init: self.emu.fork(),
             emu: self.emu.fork(),
+
             coverage: Arc::clone(&self.coverage),
             corpus: Arc::clone(&self.corpus),
             unique_crashes: Arc::clone(&self.unique_crashes),
@@ -1065,7 +1066,6 @@ fn main() {
     // The following elements are shared among all the spawned threads, so they
     // are wrapped within an `Arc`. The ones that are mutable are also
     // protected with a `Mutex`.
-    let emu_init = Arc::new(emu_init);
     let coverage = Arc::new(Mutex::new(HashSet::new()));
     let corpus = Arc::new(Mutex::new(corpus));
     let unique_crashes = Arc::new(Mutex::new(HashSet::new()));
@@ -1073,12 +1073,13 @@ fn main() {
 
     // Create a base fuzzer instance and take a snapshot.
     let mut fuzzer = Fuzzer::new(
-        Arc::clone(&emu_init),
+        emu_init,
         Arc::clone(&coverage),
         Arc::clone(&corpus),
         Arc::clone(&unique_crashes),
         Arc::clone(&stats),
     );
+
     //000000000012af04 <_open>:
     // ...
     // 12af1c:	40000893          	li	a7,1024
