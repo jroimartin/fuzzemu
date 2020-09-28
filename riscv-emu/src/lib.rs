@@ -3,7 +3,6 @@
 
 #![feature(asm)]
 
-pub mod elf;
 pub mod emulator;
 pub mod jit;
 pub mod mmu;

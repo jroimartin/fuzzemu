@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use riscv_emu::elf::{self, Elf};
 use riscv_emu::emulator::{Emulator, RegAlias, VmExit};
 use riscv_emu::jit::JitCache;
 use riscv_emu::mmu::{self, Mmu, Perm, VirtAddr, PERM_READ, PERM_WRITE};
@@ -871,11 +870,16 @@ fn load_program<P: AsRef<Path>>(
     program: P,
 ) -> Result<(), FuzzExit> {
     let contents = fs::read(program)?;
-    let elf = Elf::parse(&contents)?;
+    let elf = elf::parse(&contents)?;
 
     let mut max_addr = 0;
 
     for phdr in elf.phdrs() {
+        // Get header type and skip non PT_LOAD headers.
+        if phdr.p_type() != 1 {
+            continue;
+        }
+
         let file_offset = phdr.offset();
         let file_end = file_offset
             .checked_add(phdr.file_size())
