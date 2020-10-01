@@ -11,9 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use elf::defs::{SegmentType, PF_R, PF_W, PF_X};
 use riscv_emu::emulator::{Emulator, RegAlias, VmExit};
 use riscv_emu::jit::JitCache;
-use riscv_emu::mmu::{self, Mmu, Perm, VirtAddr, PERM_READ, PERM_WRITE};
+use riscv_emu::mmu::{
+    self, Mmu, Perm, VirtAddr, PERM_EXEC, PERM_READ, PERM_WRITE,
+};
 
 /// If `true`, print debug messages.
 const DEBUG: bool = false;
@@ -863,6 +866,23 @@ impl Fuzzer {
     }
 }
 
+/// Converts from ELF segment flags to `Mmu` permissions.
+fn flags_to_perms(flags: u32) -> Perm {
+    let mut perms = 0;
+
+    if flags & PF_R != 0 {
+        perms |= PERM_READ;
+    }
+    if flags & PF_W != 0 {
+        perms |= PERM_WRITE;
+    }
+    if flags & PF_X != 0 {
+        perms |= PERM_EXEC;
+    }
+
+    Perm(perms)
+}
+
 /// Loads an ELF program in the emulator. It also points the program
 /// counter to the entrypoint of the program and sets the program break.
 fn load_program<P: AsRef<Path>>(
@@ -870,40 +890,50 @@ fn load_program<P: AsRef<Path>>(
     program: P,
 ) -> Result<(), FuzzExit> {
     let contents = fs::read(program)?;
-    let elf = elf::parse(&contents)?;
+    let elf_headers = elf::parse(&contents)?;
 
     let mut max_addr = 0;
 
-    for phdr in elf.phdrs() {
+    for phdr in elf_headers.phdrs() {
         // Get header type and skip non PT_LOAD headers.
-        if phdr.p_type() != 1 {
-            continue;
+        match phdr.segment_type() {
+            SegmentType::Load => {
+                let phdr_offset = phdr.offset() as usize;
+                let phdr_filesz = phdr.filesz() as usize;
+
+                let file_end = phdr_offset
+                    .checked_add(phdr_filesz)
+                    .ok_or(FuzzExit::InvalidMemorySegment)?;
+
+                let file_bytes = contents
+                    .get(phdr_offset..file_end)
+                    .ok_or(FuzzExit::InvalidMemorySegment)?;
+
+                let phdr_vaddr = phdr.vaddr() as usize;
+
+                let mem_start = VirtAddr(phdr_vaddr);
+                let mem_size = phdr.memsz() as usize;
+
+                emu.mmu_mut().poke(mem_start, file_bytes)?;
+
+                let perms = flags_to_perms(phdr.flags());
+                emu.mmu_mut().set_perms(mem_start, mem_size, perms)?;
+
+                // checked_add() is not needed here because integer overflows have
+                // been already checked in the previous call to set_perms().
+                let mem_end = *mem_start + mem_size;
+
+                max_addr = cmp::max(max_addr, mem_end);
+            }
+            _ => {
+                continue;
+            }
         }
-
-        let file_offset = phdr.offset();
-        let file_end = file_offset
-            .checked_add(phdr.file_size())
-            .ok_or(FuzzExit::InvalidMemorySegment)?;
-
-        let file_bytes = contents
-            .get(file_offset..file_end)
-            .ok_or(FuzzExit::InvalidMemorySegment)?;
-
-        let mem_start = phdr.virt_addr();
-        let mem_size = phdr.mem_size();
-
-        emu.mmu_mut().poke(mem_start, file_bytes)?;
-        emu.mmu_mut().set_perms(mem_start, mem_size, phdr.perms())?;
-
-        // checked_add() is not needed here because integer overflows have
-        // been already checked in the previous call to set_perms().
-        let mem_end = *mem_start + mem_size;
-
-        max_addr = cmp::max(max_addr, mem_end);
     }
 
     // Place the program counter in the entrypoint.
-    emu.set_reg(RegAlias::Pc, *elf.entry() as u64)?;
+    let entrypoint = elf_headers.ehdr().entry();
+    emu.set_reg(RegAlias::Pc, entrypoint)?;
 
     // Set the program break to point just after the end of the process's
     // memory. 16-byte aligned.
