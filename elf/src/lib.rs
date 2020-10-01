@@ -76,7 +76,9 @@ impl Parser {
 
     /// Returns an `Parser` initialized with the provided `data`. It returns
     /// error if the `ident` field of the ELF header is not valid.
-    pub fn from_bytes(data: &[u8]) -> Result<Parser, Error> {
+    pub fn from_bytes<D: AsRef<[u8]>>(data: D) -> Result<Parser, Error> {
+        let data = data.as_ref();
+
         // Check ELF magic.
         let magic = data.get(..4).ok_or(Error::ParseError)?;
         if magic != b"\x7fELF" {
@@ -154,10 +156,20 @@ impl Parser {
         let ehdr = self.parse_ehdr()?;
         let mut phdrs = Vec::new();
 
-        for i in 0..ehdr.phnum as u64 {
-            let offset = ehdr.phoff + i * (ehdr.phentsize as u64);
-            let phdr = self.parse_phdr(offset)?;
-            phdrs.push(phdr);
+        // If the number of entries in the program header table is larger than
+        // or equal to PN_XNUM (0xffff), this member holds PN_XNUM (0xffff) and
+        // the real number of entries in the program header table is held in
+        // the sh_info member of the initial entry in section header table.
+        // Otherwise, the sh_info member of the initial entry contains the
+        // value zero.
+        if ehdr.phnum != PN_XNUM {
+            for i in 0..ehdr.phnum as u64 {
+                let offset = ehdr.phoff + i * (ehdr.phentsize as u64);
+                let phdr = self.parse_phdr(offset)?;
+                phdrs.push(phdr);
+            }
+        } else {
+            todo!();
         }
 
         Ok(Elf { ehdr, phdrs })
@@ -482,8 +494,8 @@ impl Phdr {
 }
 
 /// Parses `data` as an ELF file and returns an `Elf` structure.
-pub fn parse(data: &[u8]) -> Result<Elf, Error> {
-    Parser::from_bytes(&data)?.parse()
+pub fn parse<D: AsRef<[u8]>>(data: D) -> Result<Elf, Error> {
+    Parser::from_bytes(data)?.parse()
 }
 
 /// Parses an ELF file and returns an `Elf` structure.
