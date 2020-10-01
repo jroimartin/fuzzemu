@@ -204,7 +204,7 @@ impl Mmu {
         assert!(size >= DIRTY_BLOCK_SIZE, "invalid size");
 
         let dirty_size = (size + DIRTY_BLOCK_SIZE - 1) / DIRTY_BLOCK_SIZE;
-        let dirty_bitmap_size = dirty_size + 63 / 64;
+        let dirty_bitmap_size = (dirty_size + 63) / 64;
 
         Mmu {
             size,
@@ -710,13 +710,13 @@ mod tests {
 
     #[test]
     fn mmu_new_edge_size_equal() {
-        let mmu = Mmu::new(2 * DIRTY_BLOCK_SIZE);
+        let mmu = Mmu::new(64 * DIRTY_BLOCK_SIZE);
         let want = Mmu {
-            size: 2 * DIRTY_BLOCK_SIZE,
-            memory: vec![0; 2 * DIRTY_BLOCK_SIZE],
-            perms: vec![Perm(0); 2 * DIRTY_BLOCK_SIZE],
+            size: 64 * DIRTY_BLOCK_SIZE,
+            memory: vec![0; 64 * DIRTY_BLOCK_SIZE],
+            perms: vec![Perm(0); 64 * DIRTY_BLOCK_SIZE],
             dirty: vec![],
-            dirty_bitmap: vec![0; 2],
+            dirty_bitmap: vec![0; 1],
             brk: VirtAddr(0),
             active_allocs: HashMap::new(),
         };
@@ -726,13 +726,13 @@ mod tests {
 
     #[test]
     fn mmu_new_edge_size_below() {
-        let mmu = Mmu::new(2 * DIRTY_BLOCK_SIZE - 1);
+        let mmu = Mmu::new(64 * DIRTY_BLOCK_SIZE - 1);
         let want = Mmu {
-            size: 2 * DIRTY_BLOCK_SIZE - 1,
-            memory: vec![0; 2 * DIRTY_BLOCK_SIZE - 1],
-            perms: vec![Perm(0); 2 * DIRTY_BLOCK_SIZE - 1],
+            size: 64 * DIRTY_BLOCK_SIZE - 1,
+            memory: vec![0; 64 * DIRTY_BLOCK_SIZE - 1],
+            perms: vec![Perm(0); 64 * DIRTY_BLOCK_SIZE - 1],
             dirty: vec![],
-            dirty_bitmap: vec![0; 2],
+            dirty_bitmap: vec![0; 1],
             brk: VirtAddr(0),
             active_allocs: HashMap::new(),
         };
@@ -742,13 +742,13 @@ mod tests {
 
     #[test]
     fn mmu_new_edge_size_above() {
-        let mmu = Mmu::new(2 * DIRTY_BLOCK_SIZE + 1);
+        let mmu = Mmu::new(64 * DIRTY_BLOCK_SIZE + 1);
         let want = Mmu {
-            size: 2 * DIRTY_BLOCK_SIZE + 1,
-            memory: vec![0; 2 * DIRTY_BLOCK_SIZE + 1],
-            perms: vec![Perm(0); 2 * DIRTY_BLOCK_SIZE + 1],
+            size: 64 * DIRTY_BLOCK_SIZE + 1,
+            memory: vec![0; 64 * DIRTY_BLOCK_SIZE + 1],
+            perms: vec![Perm(0); 64 * DIRTY_BLOCK_SIZE + 1],
             dirty: vec![],
-            dirty_bitmap: vec![0; 3],
+            dirty_bitmap: vec![0; 2],
             brk: VirtAddr(0),
             active_allocs: HashMap::new(),
         };
