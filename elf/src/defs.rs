@@ -1402,6 +1402,9 @@ pub enum SectionType {
     /// Version symbol table.
     GnuVerSym,
 
+    /// RISC-V attributes.
+    RiscVAttributes,
+
     /// Unknown.
     Unknown(u32),
 }
@@ -1436,6 +1439,7 @@ impl From<u32> for SectionType {
             0x6ffffffd => SectionType::GnuVerDef,
             0x6ffffffe => SectionType::GnuVerNeed,
             0x6fffffff => SectionType::GnuVerSym,
+            0x70000003 => SectionType::RiscVAttributes,
             val => SectionType::Unknown(val),
         }
     }
@@ -1477,6 +1481,7 @@ impl fmt::Display for SectionType {
             SectionType::GnuVerDef => write!(f, "Version definition section"),
             SectionType::GnuVerNeed => write!(f, "Version needs section"),
             SectionType::GnuVerSym => write!(f, "Version symbol table"),
+            SectionType::RiscVAttributes => write!(f, "RISC-V attributes"),
             SectionType::Unknown(val) => write!(f, "Unknown ({})", val),
         }
     }
