@@ -1317,3 +1317,212 @@ pub const PF_W: u32 = 1 << 1;
 
 /// Segment is readable.
 pub const PF_R: u32 = 1 << 2;
+
+/// Section type, which defines the section's contents and semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionType {
+    /// Section header table entry unused.
+    Null,
+
+    /// Program data.
+    ProgBits,
+
+    /// Symbol table.
+    SymTab,
+
+    /// String table.
+    StrTab,
+
+    /// Relocation entries with addends.
+    RelA,
+
+    /// Symbol hash table.
+    Hash,
+
+    /// Dynamic linking information.
+    Dynamic,
+
+    /// Notes.
+    Note,
+
+    /// Program space with no data (bss).
+    NoBits,
+
+    /// Relocation entries, no addends.
+    Rel,
+
+    /// Reserved.
+    ShLib,
+
+    /// Dynamic linker symbol table.
+    DynSym,
+
+    /// Array of constructors.
+    InitArray,
+
+    /// Array of destructors.
+    FiniArray,
+
+    /// Array of pre-constructors.
+    PreinitArray,
+
+    /// Section group.
+    Group,
+
+    /// Extended section indeces.
+    SymTabShNdx,
+
+    /// Object attributes.
+    GnuAttributes,
+
+    /// GNU-style hash table.
+    GnuHash,
+
+    /// Prelink library list.
+    GnuLibList,
+
+    /// Checksum for DSO content.
+    Checksum,
+
+    /// SUN Move.
+    SunwMove,
+
+    /// SUN COMDAT.
+    SunwComDat,
+
+    /// SUN SymInfo.
+    SunwSymInfo,
+
+    /// Version definition section.
+    GnuVerDef,
+
+    /// Version needs section.
+    GnuVerNeed,
+
+    /// Version symbol table.
+    GnuVerSym,
+
+    /// Unknown.
+    Unknown(u32),
+}
+
+impl From<u32> for SectionType {
+    fn from(value: u32) -> Self {
+        match value {
+            0 => SectionType::Null,
+            1 => SectionType::ProgBits,
+            2 => SectionType::SymTab,
+            3 => SectionType::StrTab,
+            4 => SectionType::RelA,
+            5 => SectionType::Hash,
+            6 => SectionType::Dynamic,
+            7 => SectionType::Note,
+            8 => SectionType::NoBits,
+            9 => SectionType::Rel,
+            10 => SectionType::ShLib,
+            11 => SectionType::DynSym,
+            14 => SectionType::InitArray,
+            15 => SectionType::FiniArray,
+            16 => SectionType::PreinitArray,
+            17 => SectionType::Group,
+            18 => SectionType::SymTabShNdx,
+            0x6ffffff5 => SectionType::GnuAttributes,
+            0x6ffffff6 => SectionType::GnuHash,
+            0x6ffffff7 => SectionType::GnuLibList,
+            0x6ffffff8 => SectionType::Checksum,
+            0x6ffffffa => SectionType::SunwMove,
+            0x6ffffffb => SectionType::SunwComDat,
+            0x6ffffffc => SectionType::SunwSymInfo,
+            0x6ffffffd => SectionType::GnuVerDef,
+            0x6ffffffe => SectionType::GnuVerNeed,
+            0x6fffffff => SectionType::GnuVerSym,
+            val => SectionType::Unknown(val),
+        }
+    }
+}
+
+impl fmt::Display for SectionType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            SectionType::Null => {
+                write!(f, "Section header table entry unused")
+            }
+            SectionType::ProgBits => write!(f, "Program data"),
+            SectionType::SymTab => write!(f, "Symbol table"),
+            SectionType::StrTab => write!(f, "String table"),
+            SectionType::RelA => write!(f, "Relocation entries with addends"),
+            SectionType::Hash => write!(f, "Symbol hash table"),
+            SectionType::Dynamic => write!(f, "Dynamic linking information"),
+            SectionType::Note => write!(f, "Notes"),
+            SectionType::NoBits => {
+                write!(f, "Program space with no data (bss)")
+            }
+            SectionType::Rel => write!(f, "Relocation entries, no addends"),
+            SectionType::ShLib => write!(f, "Reserved"),
+            SectionType::DynSym => write!(f, "Dynamic linker symbol table"),
+            SectionType::InitArray => write!(f, "Array of constructors"),
+            SectionType::FiniArray => write!(f, "Array of destructors"),
+            SectionType::PreinitArray => {
+                write!(f, "Array of pre-constructors")
+            }
+            SectionType::Group => write!(f, "Section group"),
+            SectionType::SymTabShNdx => write!(f, "Extended section indeces"),
+            SectionType::GnuAttributes => write!(f, "Object attributes"),
+            SectionType::GnuHash => write!(f, "GNU-style hash table"),
+            SectionType::GnuLibList => write!(f, "Prelink library list"),
+            SectionType::Checksum => write!(f, "Checksum for DSO content"),
+            SectionType::SunwMove => write!(f, "SUN Move"),
+            SectionType::SunwComDat => write!(f, "SUN COMDAT"),
+            SectionType::SunwSymInfo => write!(f, "SUN SymInfo"),
+            SectionType::GnuVerDef => write!(f, "Version definition section"),
+            SectionType::GnuVerNeed => write!(f, "Version needs section"),
+            SectionType::GnuVerSym => write!(f, "Version symbol table"),
+            SectionType::Unknown(val) => write!(f, "Unknown ({})", val),
+        }
+    }
+}
+
+/// Section is writable.
+pub const SHF_WRITE: u64 = 1 << 0;
+
+/// Section occupies memory during execution.
+pub const SHF_ALLOC: u64 = 1 << 1;
+
+/// Section is executable.
+pub const SHF_EXECINSTR: u64 = 1 << 2;
+
+/// Section might be merged.
+pub const SHF_MERGE: u64 = 1 << 4;
+
+/// Section contains nul-terminated strings.
+pub const SHF_STRINGS: u64 = 1 << 5;
+
+/// The field `info` contains SHT index.
+pub const SHF_INFO_LINK: u64 = 1 << 6;
+
+/// Preserve order after combining.
+pub const SHF_LINK_ORDER: u64 = 1 << 7;
+
+/// Non-standard OS specific handling required.
+pub const SHF_OS_NONCONFORMING: u64 = 1 << 8;
+
+/// Section is member of a group.
+pub const SHF_GROUP: u64 = 1 << 9;
+
+/// Section hold thread-local data.
+pub const SHF_TLS: u64 = 1 << 10;
+
+/// Section with compressed data.
+pub const SHF_COMPRESSED: u64 = 1 << 11;
+
+/// OS-specific.
+pub const SHF_MASKOS: u64 = 0x0ff00000;
+
+/// Processor-specific.
+pub const SHF_MASKPROC: u64 = 0xf0000000;
+
+/// Special ordering requirement (Solaris).
+pub const SHF_ORDERED: u64 = 1 << 30;
+
+/// Section is excluded unless referenced or allocated (Solaris).
+pub const SHF_EXCLUDE: u64 = 1 << 31;

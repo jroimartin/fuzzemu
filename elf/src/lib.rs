@@ -155,16 +155,20 @@ impl Parser {
     pub fn parse(&mut self) -> Result<Elf, Error> {
         let ehdr = self.parse_ehdr()?;
         let mut phdrs = Vec::new();
+        let mut shdrs = Vec::new();
 
         // If the number of entries in the program header table is larger than
-        // or equal to PN_XNUM (0xffff), this member holds PN_XNUM (0xffff) and
-        // the real number of entries in the program header table is held in
-        // the sh_info member of the initial entry in section header table.
-        // Otherwise, the sh_info member of the initial entry contains the
-        // value zero.
+        // or equal to `PN_XNUM` (0xffff), this member holds `PN_XNUM` (0xffff)
+        // and the real number of entries in the program header table is held
+        // in the `info` member of the initial entry in section header table.
+        // Otherwise, the `info` member of the initial entry contains the value
+        // zero.
         if ehdr.phnum != PN_XNUM {
             for i in 0..ehdr.phnum as u64 {
-                let offset = ehdr.phoff + i * (ehdr.phentsize as u64);
+                let offset = ehdr
+                    .phoff
+                    .checked_add(i * (ehdr.phentsize as u64))
+                    .ok_or(Error::ParseError)?;
                 let phdr = self.parse_phdr(offset)?;
                 phdrs.push(phdr);
             }
@@ -172,7 +176,26 @@ impl Parser {
             todo!();
         }
 
-        Ok(Elf { ehdr, phdrs })
+        // If the number of entries in the section header table is larger than
+        // or equal to `SHN_LORESERVE` (0xff00), `shnum` holds the value zero
+        // and the real number of entries in the section header table is held
+        // in the `size` member of the initial entry in section header table.
+        // Otherwise, the `size` member of the initial entry in the section
+        // header table holds the value zero.
+        if ehdr.shnum != 0 {
+            for i in 0..ehdr.shnum as u64 {
+                let offset = ehdr
+                    .shoff
+                    .checked_add(i * (ehdr.shentsize as u64))
+                    .ok_or(Error::ParseError)?;
+                let shdr = self.parse_shdr(offset)?;
+                shdrs.push(shdr);
+            }
+        } else {
+            todo!();
+        }
+
+        Ok(Elf { ehdr, phdrs, shdrs })
     }
 
     /// Returns an `Ehdr` structure containing the parsed ELF header.
@@ -180,7 +203,6 @@ impl Parser {
         self.data.seek(SeekFrom::Start(0))?;
 
         match self.class {
-            Class::None => Err(Error::ParseError),
             Class::Elf32 => {
                 let mut ident = [0u8; 16];
                 self.data.read_exact(&mut ident)?;
@@ -227,6 +249,7 @@ impl Parser {
 
                 Ok(ehdr)
             }
+            Class::None => Err(Error::ParseError),
         }
     }
 
@@ -235,7 +258,6 @@ impl Parser {
         self.data.seek(SeekFrom::Start(offset))?;
 
         match self.class {
-            Class::None => Err(Error::ParseError),
             Class::Elf32 => {
                 let phdr = Phdr {
                     segment_type: self.read_val::<u32>()?.into(),
@@ -264,8 +286,60 @@ impl Parser {
 
                 Ok(phdr)
             }
+            Class::None => Err(Error::ParseError),
         }
     }
+
+    /// Returns a `Shdr` structure containing the parsed section header.
+    fn parse_shdr(&mut self, offset: u64) -> Result<Shdr, Error> {
+        self.data.seek(SeekFrom::Start(offset))?;
+
+        match self.class {
+            Class::Elf32 => {
+                let shdr = Shdr {
+                    name: self.read_val::<u32>()?,
+                    section_type: self.read_val::<u32>()?.into(),
+                    flags: self.read_val::<u32>()? as u64,
+                    addr: self.read_val::<u64>()?,
+                    offset: self.read_val::<u64>()?,
+                    size: self.read_val::<u32>()? as u64,
+                    link: self.read_val::<u32>()?,
+                    info: self.read_val::<u32>()?,
+                    addralign: self.read_val::<u32>()? as u64,
+                    entsize: self.read_val::<u32>()? as u64,
+                };
+
+                Ok(shdr)
+            }
+            Class::Elf64 => {
+                let shdr = Shdr {
+                    name: self.read_val::<u32>()?,
+                    section_type: self.read_val::<u32>()?.into(),
+                    flags: self.read_val::<u64>()?,
+                    addr: self.read_val::<u64>()?,
+                    offset: self.read_val::<u64>()?,
+                    size: self.read_val::<u64>()?,
+                    link: self.read_val::<u32>()?,
+                    info: self.read_val::<u32>()?,
+                    addralign: self.read_val::<u64>()?,
+                    entsize: self.read_val::<u64>()?,
+                };
+
+                Ok(shdr)
+            }
+            Class::None => Err(Error::ParseError),
+        }
+    }
+}
+
+/// Parses `data` as an ELF file and returns an `Elf` structure.
+pub fn parse<D: AsRef<[u8]>>(data: D) -> Result<Elf, Error> {
+    Parser::from_bytes(data)?.parse()
+}
+
+/// Parses an ELF file and returns an `Elf` structure.
+pub fn parse_file<P: AsRef<Path>>(path: P) -> Result<Elf, Error> {
+    Parser::from_file(path)?.parse()
 }
 
 /// Parsed ELF executable.
@@ -276,6 +350,9 @@ pub struct Elf {
 
     /// Program headers.
     phdrs: Vec<Phdr>,
+
+    /// Section headers.
+    shdrs: Vec<Shdr>,
 }
 
 impl Elf {
@@ -287,6 +364,11 @@ impl Elf {
     /// Returns the program headers.
     pub fn phdrs(&self) -> Vec<Phdr> {
         self.phdrs.clone()
+    }
+
+    /// Returns the section headers.
+    pub fn shdrs(&self) -> Vec<Shdr> {
+        self.shdrs.clone()
     }
 }
 
@@ -453,7 +535,7 @@ impl Phdr {
         self.segment_type
     }
 
-    /// Returns a bit mask of flags relevant to the segment.
+    /// Returns a bit mask of flags relevant to the segment. See `PF_` consts.
     pub fn flags(&self) -> u32 {
         self.flags
     }
@@ -493,14 +575,111 @@ impl Phdr {
     }
 }
 
-/// Parses `data` as an ELF file and returns an `Elf` structure.
-pub fn parse<D: AsRef<[u8]>>(data: D) -> Result<Elf, Error> {
-    Parser::from_bytes(data)?.parse()
+/// Section header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shdr {
+    /// Name of the section. Its value is an index into the section header
+    /// string table section, giving the location of a null-terminated string.
+    name: u32,
+
+    /// Categorizes the section's contents and semantics.
+    section_type: SectionType,
+
+    /// Sections support one-bit flags that describe miscellaneous attributes.
+    /// See `SHF_` consts.
+    flags: u64, // Elf32: u32
+
+    /// If this section appears in the memory image of a process, this member
+    /// holds the address at which the section's first byte should reside.
+    /// Otherwise, the member contains zero.
+    addr: u64,
+
+    /// Byte offset from the beginning of the file to the first byte in the
+    /// section.
+    offset: u64,
+
+    /// Section's size in bytes.
+    size: u64, // Elf32: u32
+
+    /// Section header table index link.
+    link: u32,
+
+    /// Extra information.
+    info: u32,
+
+    /// Some sections have address alignment constraints. The value 0 or 1
+    /// means that the section has no alignment constraints.
+    addralign: u64, // Elf32: u32
+
+    /// Some sections hold a table of fixed-sized entries, such as a symbol
+    /// table. For such a section, this member gives the size in bytes for
+    /// each entry. This member contains zero if the section does not hold a
+    /// table of fixed-size entries.
+    entsize: u64, // Elf32: u32
 }
 
-/// Parses an ELF file and returns an `Elf` structure.
-pub fn parse_file<P: AsRef<Path>>(path: P) -> Result<Elf, Error> {
-    Parser::from_file(path)?.parse()
+impl Shdr {
+    /// Returns the name of the section. Its value is an index into the section
+    /// header string table section, giving the location of a null-terminated
+    /// string.
+    pub fn name(&self) -> u32 {
+        self.name
+    }
+
+    /// Returns the section type, which categorizes the section's contents and
+    /// semantics.
+    pub fn section_type(&self) -> SectionType {
+        self.section_type
+    }
+
+    /// Returns the flags of the section. Sections support one-bit flags that
+    /// describe miscellaneous attributes. See `SHF_` consts.
+    pub fn flags(&self) -> u64 {
+        self.flags
+    }
+
+    /// If this section appears in the memory image of a process, this function
+    /// returns the address at which the section's first byte should reside.
+    /// Otherwise, zero is returned.
+    pub fn addr(&self) -> u64 {
+        self.addr
+    }
+
+    /// Returns the byte offset from the beginning of the file to the first
+    /// byte in the section.
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Returns the section's size in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Returns the section header table index link.
+    pub fn link(&self) -> u32 {
+        self.link
+    }
+
+    /// Returns extra information about the section.
+    pub fn info(&self) -> u32 {
+        self.info
+    }
+
+    /// Returns the alignment of the section. Some sections have address
+    /// alignment constraints. The value 0 or 1 means that the section has no
+    /// alignment constraints.
+    pub fn addralign(&self) -> u64 {
+        self.addralign
+    }
+
+    /// Some sections hold a table of fixed-sized entries, such as a symbol
+    /// table. For such a section, this function returns the size in bytes for
+    /// each entry. If the section does not hold a table of fixed-size entries,
+    /// zero is returned.
+    pub fn entsize(&self) -> u64 {
+        self.entsize
+    }
 }
 
 #[cfg(test)]
