@@ -867,7 +867,7 @@ impl Fuzzer {
 }
 
 /// Converts from ELF segment flags to `Mmu` permissions.
-fn flags_to_perm(flags: u32) -> Perm {
+fn segment_flags_to_perm(flags: u32) -> Perm {
     let mut perms = 0;
 
     if flags & PF_R != 0 {
@@ -916,7 +916,7 @@ fn load_program<P: AsRef<Path>>(
 
                 emu.mmu_mut().poke(mem_start, file_bytes)?;
 
-                let perms = flags_to_perm(phdr.flags());
+                let perms = segment_flags_to_perm(phdr.flags());
                 emu.mmu_mut().set_perms(mem_start, mem_size, perms)?;
 
                 // checked_add() is not needed here because integer overflows have
