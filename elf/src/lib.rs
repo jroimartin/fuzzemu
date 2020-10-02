@@ -155,7 +155,10 @@ impl Parser {
     pub fn parse(&mut self) -> Result<Elf, Error> {
         let ehdr = self.parse_ehdr()?;
         let mut phdrs = Vec::new();
-        let mut shdrs = Vec::new();
+
+        let shdr_0 = self.parse_shdr(ehdr.shoff)?;
+
+        let mut shdrs = vec![shdr_0];
 
         // If the number of entries in the program header table is larger than
         // or equal to `PN_XNUM` (0xffff), this member holds `PN_XNUM` (0xffff)
@@ -163,17 +166,23 @@ impl Parser {
         // in the `info` member of the initial entry in section header table.
         // Otherwise, the `info` member of the initial entry contains the value
         // zero.
-        if ehdr.phnum != PN_XNUM {
-            for i in 0..ehdr.phnum as u64 {
-                let offset = ehdr
-                    .phoff
-                    .checked_add(i * (ehdr.phentsize as u64))
-                    .ok_or(Error::ParseError)?;
-                let phdr = self.parse_phdr(offset)?;
-                phdrs.push(phdr);
-            }
+        let phnum = if ehdr.phnum == PN_XNUM {
+            shdr_0.info
         } else {
-            todo!();
+            ehdr.phnum as u32
+        };
+
+        if phnum == 0 {
+            return Err(Error::ParseError);
+        }
+
+        for i in 0..phnum as u64 {
+            let offset = ehdr
+                .phoff
+                .checked_add(i * (ehdr.phentsize as u64))
+                .ok_or(Error::ParseError)?;
+            let phdr = self.parse_phdr(offset)?;
+            phdrs.push(phdr);
         }
 
         // If the number of entries in the section header table is larger than
@@ -182,17 +191,23 @@ impl Parser {
         // in the `size` member of the initial entry in section header table.
         // Otherwise, the `size` member of the initial entry in the section
         // header table holds the value zero.
-        if ehdr.shnum != 0 {
-            for i in 0..ehdr.shnum as u64 {
-                let offset = ehdr
-                    .shoff
-                    .checked_add(i * (ehdr.shentsize as u64))
-                    .ok_or(Error::ParseError)?;
-                let shdr = self.parse_shdr(offset)?;
-                shdrs.push(shdr);
-            }
+        let shnum = if ehdr.shnum == 0 {
+            shdr_0.size
         } else {
-            todo!();
+            ehdr.shnum as u64
+        };
+
+        if shnum == 0 {
+            return Err(Error::ParseError);
+        }
+
+        for i in 1..shnum as u64 {
+            let offset = ehdr
+                .shoff
+                .checked_add(i * (ehdr.shentsize as u64))
+                .ok_or(Error::ParseError)?;
+            let shdr = self.parse_shdr(offset)?;
+            shdrs.push(shdr);
         }
 
         Ok(Elf { ehdr, phdrs, shdrs })
@@ -684,6 +699,8 @@ impl Shdr {
 
 #[cfg(test)]
 mod tests {
+    // TODO(rm): Add binaries using `shdrs[0]` for `shnum` and `phnum`.
+
     use super::*;
 
     #[test]
