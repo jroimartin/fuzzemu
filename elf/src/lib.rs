@@ -212,9 +212,9 @@ impl Parser {
 
         let mut section_names = Vec::new();
 
+        let shstr =
+            shdrs.get(ehdr.shstrndx as usize).ok_or(Error::ParseError)?;
         for shdr in &shdrs {
-            let shstr =
-                shdrs.get(ehdr.shstrndx as usize).ok_or(Error::ParseError)?;
             let offset = shstr
                 .offset
                 .checked_add(shdr.name as u64)
