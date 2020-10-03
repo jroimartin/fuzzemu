@@ -1369,7 +1369,7 @@ pub enum SectionType {
     /// Section group.
     Group,
 
-    /// Extended section indeces.
+    /// Extended section indices.
     SymTabShNdx,
 
     /// Object attributes.
@@ -1470,7 +1470,7 @@ impl fmt::Display for SectionType {
                 write!(f, "Array of pre-constructors")
             }
             SectionType::Group => write!(f, "Section group"),
-            SectionType::SymTabShNdx => write!(f, "Extended section indeces"),
+            SectionType::SymTabShNdx => write!(f, "Extended section indices"),
             SectionType::GnuAttributes => write!(f, "Object attributes"),
             SectionType::GnuHash => write!(f, "GNU-style hash table"),
             SectionType::GnuLibList => write!(f, "Prelink library list"),
@@ -1499,7 +1499,7 @@ pub const SHF_EXECINSTR: u64 = 1 << 2;
 /// Section might be merged.
 pub const SHF_MERGE: u64 = 1 << 4;
 
-/// Section contains nul-terminated strings.
+/// Section contains null-terminated strings.
 pub const SHF_STRINGS: u64 = 1 << 5;
 
 /// The field `info` contains SHT index.

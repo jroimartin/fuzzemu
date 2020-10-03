@@ -154,11 +154,7 @@ impl Parser {
     /// Returns an `Elf` structure containing the parsed data.
     pub fn parse(&mut self) -> Result<Elf, Error> {
         let ehdr = self.parse_ehdr()?;
-        let mut phdrs = Vec::new();
-
         let shdr_0 = self.parse_shdr(ehdr.shoff)?;
-
-        let mut shdrs = vec![shdr_0];
 
         // If the number of entries in the program header table is larger than
         // or equal to `PN_XNUM` (0xffff), this member holds `PN_XNUM` (0xffff)
@@ -175,6 +171,8 @@ impl Parser {
         if phnum == 0 {
             return Err(Error::ParseError);
         }
+
+        let mut phdrs = Vec::new();
 
         for i in 0..phnum as u64 {
             let offset = ehdr
@@ -201,6 +199,8 @@ impl Parser {
             return Err(Error::ParseError);
         }
 
+        let mut shdrs = vec![shdr_0];
+
         for i in 1..shnum as u64 {
             let offset = ehdr
                 .shoff
@@ -210,7 +210,25 @@ impl Parser {
             shdrs.push(shdr);
         }
 
-        Ok(Elf { ehdr, phdrs, shdrs })
+        let mut section_names = Vec::new();
+
+        for shdr in &shdrs {
+            let shstr =
+                shdrs.get(ehdr.shstrndx as usize).ok_or(Error::ParseError)?;
+            let offset = shstr
+                .offset
+                .checked_add(shdr.name as u64)
+                .ok_or(Error::ParseError)?;
+            let name = self.read_cstr(offset)?;
+            section_names.push(name);
+        }
+
+        Ok(Elf {
+            ehdr,
+            phdrs,
+            shdrs,
+            section_names,
+        })
     }
 
     /// Returns an `Ehdr` structure containing the parsed ELF header.
@@ -345,6 +363,21 @@ impl Parser {
             Class::None => Err(Error::ParseError),
         }
     }
+
+    /// Read a null-terminated string starting at `offset`.
+    fn read_cstr(&mut self, offset: u64) -> Result<String, Error> {
+        self.data.seek(SeekFrom::Start(offset))?;
+
+        let mut cstr = String::new();
+
+        loop {
+            let byte = self.read_val::<u8>()?;
+            if byte == 0 {
+                break Ok(cstr);
+            }
+            cstr.push(byte as char);
+        }
+    }
 }
 
 /// Parses `data` as an ELF file and returns an `Elf` structure.
@@ -368,6 +401,10 @@ pub struct Elf {
 
     /// Section headers.
     shdrs: Vec<Shdr>,
+
+    /// Section names. The name of the section `shdrs[i]` corresponds to
+    /// `section_names[i]`.
+    section_names: Vec<String>,
 }
 
 impl Elf {
@@ -384,6 +421,12 @@ impl Elf {
     /// Returns the section headers.
     pub fn shdrs(&self) -> Vec<Shdr> {
         self.shdrs.clone()
+    }
+
+    /// Returns the section names. The name of the section `shdrs[i]`
+    /// corresponds to `section_names[i]`.
+    pub fn section_names(&self) -> Vec<String> {
+        self.section_names.clone()
     }
 }
 
@@ -1074,6 +1117,44 @@ mod tests {
         ];
 
         assert_eq!(shdrs, want);
+    }
+
+    #[test]
+    fn parse_section_names() {
+        let filename = Path::new("testdata").join("hello");
+        let contents = fs::read(filename).unwrap();
+
+        let mut elf_parser = Parser::from_bytes(&contents).unwrap();
+        let headers = elf_parser.parse().unwrap();
+        let section_names = headers.section_names();
+
+        let want = vec![
+            String::from(""),
+            String::from(".text"),
+            String::from(".rodata"),
+            String::from(".eh_frame"),
+            String::from(".init_array"),
+            String::from(".fini_array"),
+            String::from(".data"),
+            String::from(".sdata"),
+            String::from(".sbss"),
+            String::from(".bss"),
+            String::from(".comment"),
+            String::from(".riscv.attributes"),
+            String::from(".debug_aranges"),
+            String::from(".debug_info"),
+            String::from(".debug_abbrev"),
+            String::from(".debug_line"),
+            String::from(".debug_frame"),
+            String::from(".debug_str"),
+            String::from(".debug_loc"),
+            String::from(".debug_ranges"),
+            String::from(".symtab"),
+            String::from(".strtab"),
+            String::from(".shstrtab"),
+        ];
+
+        assert_eq!(section_names, want);
     }
 
     #[test]
